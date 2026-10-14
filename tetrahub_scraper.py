@@ -64,6 +64,8 @@ def parse_frequencies(text):
         if unit == "ghz":
             mhz = value * 1000
         elif unit == "khz":
+            if value < 30:
+                continue  # "12,5 kHz", "6,25 kHz" : largeur de canal, pas une fréquence
             mhz = value / 1000
         elif unit == "mhz":
             mhz = value
@@ -212,6 +214,38 @@ def extract(forum, topic_title, topic_url, post):
     return rows
 
 
+SECTION_NAMES = {
+    "freq-frequences-vhf-uhf": "Fréquences VHF/UHF",
+    "freq-aeronautique": "Aéronautique",
+    "freq-montagne": "Montagne",
+    "maritime": "Maritime",
+    "freq-ondes-courtes": "Ondes courtes",
+    "freq-frequences-etrangeres": "Fréquences étrangères",
+}
+
+
+def load_results(path):
+    """Relit les résultats en re-filtrant avec les règles actuelles de parse_frequencies,
+    pour que les anciennes données profitent aussi des corrections du détecteur."""
+    if not os.path.exists(path):
+        return []
+    return [r for r in json.load(open(path, encoding="utf-8")) if parse_frequencies(r["texte_trouve"])]
+
+
+def write_html(results, path):
+    """Génère une page autonome (recherche, filtres, tri) à ouvrir dans le navigateur."""
+    template = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "page_template.html"),
+                    encoding="utf-8").read()
+
+    def embed(obj):
+        # "</" empêcherait la balise <script> de se fermer au bon endroit
+        return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
+
+    meta = {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"), "sections": SECTION_NAMES}
+    page = template.replace("__DATA__", embed(results)).replace("__META__", embed(meta))
+    open(path, "w", encoding="utf-8").write(page)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Extraction des fréquences de forum.tetrahub.net")
     ap.add_argument("--forums", nargs="+", default=DEFAULT_FORUMS, help="sections à parcourir (slug d'URL)")
@@ -220,11 +254,18 @@ def main():
     ap.add_argument("--delay", type=float, default=1.5, help="pause entre deux pages, en secondes")
     ap.add_argument("--out", default="frequences", help="préfixe des fichiers de sortie")
     ap.add_argument("--state", default="etat.json", help="fichier mémorisant les messages déjà traités")
-    ap.add_argument("--full", action="store_true", help="rouvre tous les sujets, même inchangés")
+    ap.add_argument("--html-only", action="store_true", help="régénère seulement la page HTML, sans scanner")
+    ap.add_argument("--full",action="store_true", help="rouvre tous les sujets, même inchangés")
     ap.add_argument("--cookies", default="session.json", help="fichier gardant la connexion (supprime-le pour te déconnecter)")
     args = ap.parse_args()
 
     hub = TetraHub(delay=args.delay)
+
+    if args.html_only:
+        results = load_results(f"{args.out}.json")
+        write_html(results, f"{args.out}.html")
+        print(f"Page générée -> {args.out}.html")
+        return
 
     if args.list_forums:
         for slug, name in hub.list_forums():
@@ -251,7 +292,7 @@ def main():
     skipped = 0
 
     json_path = f"{args.out}.json"
-    results = json.load(open(json_path, encoding="utf-8")) if os.path.exists(json_path) else []
+    results = load_results(json_path)
     new = 0
 
     try:
@@ -291,8 +332,9 @@ def main():
             w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
             w.writeheader()
             w.writerows(results)
+        write_html(results, f"{args.out}.html")
         print(f"\n{skipped} sujets inchangés ignorés")
-        print(f"{new} nouvelles fréquences, {len(results)} au total -> {args.out}.csv / {json_path}")
+        print(f"{new} nouvelles fréquences, {len(results)} au total -> {args.out}.html / .csv / .json")
 
 
 if __name__ == "__main__":

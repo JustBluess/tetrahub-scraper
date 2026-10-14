@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fréquences TetraHub</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --text: #1d2330; --muted: #657083;
+    --border: #dfe3ea; --accent: #2563eb; --accent-soft: #e7eefe; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12151b; --surface: #1a1f27; --text: #e6e9ef; --muted: #8e98a8;
+            --border: #2c333f; --accent: #6b9bff; --accent-soft: #1f2b45; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { padding: 20px 24px 8px; }
+  h1 { margin: 0; font-size: 20px; }
+  .sub { color: var(--muted); margin-top: 2px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 24px; }
+  input, select { font: inherit; color: var(--text); background: var(--surface);
+                  border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; }
+  #q { flex: 1 1 260px; }
+  .range input { width: 90px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 24px 10px; }
+  .chip { border: 1px solid var(--border); background: var(--surface); color: var(--text);
+          border-radius: 999px; padding: 3px 11px; cursor: pointer; font: inherit; font-size: 13px; }
+  .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  label.chk { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  .count { padding: 0 24px 8px; color: var(--muted); }
+  .wrap { padding: 0 24px 32px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface);
+          border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none;
+       white-space: nowrap; font-weight: 600; }
+  th .arrow { color: var(--accent); }
+  td.f { font-family: var(--mono); white-space: nowrap; font-weight: 600; }
+  td.ctx { min-width: 280px; }
+  td.meta { color: var(--muted); white-space: nowrap; font-size: 13px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  mark { background: #fde68a; color: inherit; border-radius: 2px; }
+  @media (prefers-color-scheme: dark) { mark { background: #6b5a14; } }
+  .more { display: block; margin: 12px auto 0; }
+  button.more { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+                background: var(--surface); color: var(--text); cursor: pointer; }
+  @media (max-width: 640px) {
+    header, .controls, .chips, .count, .wrap { padding-left: 16px; padding-right: 16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fréquences TetraHub</h1>
+  <div class="sub" id="sub"></div>
+</header>
+
+<div class="controls">
+  <input id="q" type="search" placeholder="Rechercher : ville, service, indicatif, sujet…" autofocus>
+  <select id="section"><option value="">Toutes les sections</option></select>
+  <span class="range">
+    <input id="fmin" type="number" step="any" placeholder="min MHz"> –
+    <input id="fmax" type="number" step="any" placeholder="max MHz">
+  </span>
+  <label class="chk"><input id="dedup" type="checkbox" checked> masquer les doublons</label>
+</div>
+<div class="chips" id="chips"></div>
+<div class="count" id="count"></div>
+<div class="wrap">
+  <table>
+    <thead><tr>
+      <th data-k="frequence_mhz">Fréquence <span class="arrow"></span></th>
+      <th data-k="contexte">Ce que dit le message <span class="arrow"></span></th>
+      <th data-k="sujet">Sujet <span class="arrow"></span></th>
+      <th data-k="section">Section <span class="arrow"></span></th>
+      <th data-k="date">Date <span class="arrow"></span></th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <button class="more" id="more" hidden>Afficher plus</button>
+</div>
+
+<script id="data" type="application/json">__DATA__</script>
+<script id="meta" type="application/json">__META__</script>
+<script>
+const DATA = JSON.parse(document.getElementById("data").textContent);
+const META = JSON.parse(document.getElementById("meta").textContent);
+const BANDS = [
+  ["Ondes courtes", 1.6, 30], ["VHF basse", 30, 88], ["Aéro", 118, 137], ["2 m", 144, 146],
+  ["Marine VHF", 156, 163], ["Pocsag / VHF haute", 163, 174], ["TETRA / INPT", 380, 400],
+  ["70 cm", 430, 440], ["PMR446", 446, 446.2], ["UHF", 400, 470],
+];
+const PAGE = 300;
+const $ = id => document.getElementById(id);
+let sortKey = "frequence_mhz", sortDir = 1, shown = PAGE, band = null;
+
+const sectionName = s => META.sections[s] || s;
+// 446 -> "446.000", 145.6125 -> "145.6125" (au moins 3 décimales, comme sur un scanner)
+const fmtF = f => f.toFixed(6).replace(/0{1,3}$/, "").replace(/(\.\d{3}\d*?)0+$/, "$1");
+const fmtD = d => d ? new Date(d).toLocaleDateString("fr-FR") : "";
+const norm = s => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+$("sub").textContent = `${DATA.length} fréquences relevées — mis à jour le ${new Date(META.generated).toLocaleString("fr-FR")}`;
+for (const s of [...new Set(DATA.map(r => r.section))].sort()) {
+  const o = document.createElement("option"); o.value = s; o.textContent = sectionName(s); $("section").append(o);
+}
+for (const [name, lo, hi] of BANDS) {
+  const b = document.createElement("button"); b.className = "chip"; b.textContent = `${name} (${lo}–${hi})`;
+  b.onclick = () => {
+    band = band === b ? null : b;
+    document.querySelectorAll(".chip").forEach(c => c.classList.toggle("on", c === band));
+    $("fmin").value = band ? lo : ""; $("fmax").value = band ? hi : "";
+    shown = PAGE; render();
+  };
+  $("chips").append(b);
+}
+DATA.forEach(r => r._s = norm([r.contexte, r.sujet, r.auteur, sectionName(r.section)].join(" ")));
+
+function filtered() {
+  const words = norm($("q").value).split(/\s+/).filter(Boolean);
+  const sec = $("section").value, lo = parseFloat($("fmin").value), hi = parseFloat($("fmax").value);
+  const seen = new Set();
+  const out = DATA.filter(r => {
+    if (sec && r.section !== sec) return false;
+    if (!isNaN(lo) && r.frequence_mhz < lo) return false;
+    if (!isNaN(hi) && r.frequence_mhz > hi) return false;
+    if (!words.every(w => r._s.includes(w) || String(r.frequence_mhz).startsWith(w.replace(",", ".")))) return false;
+    if ($("dedup").checked) {
+      const k = r.frequence_mhz + "|" + norm(r.contexte);
+      if (seen.has(k)) return false;
+      seen.add(k);
+    }
+    return true;
+  });
+  out.sort((a, b) => {
+    const x = a[sortKey], y = b[sortKey];
+    return (typeof x === "number" ? x - y : String(x).localeCompare(String(y), "fr")) * sortDir;
+  });
+  return { out, words };
+}
+
+// Ajoute le texte en surlignant les mots recherchés (sans jamais interpréter de HTML venu du forum)
+function highlight(el, text, words) {
+  if (!words.length) { el.textContent = text; return; }
+  const n = norm(text);
+  let i = 0;
+  while (i < text.length) {
+    let best = -1, len = 0;
+    for (const w of words) { const p = n.indexOf(w, i); if (p !== -1 && (best === -1 || p < best)) { best = p; len = w.length; } }
+    if (best === -1) { el.append(text.slice(i)); break; }
+    el.append(text.slice(i, best));
+    const m = document.createElement("mark"); m.textContent = text.slice(best, best + len); el.append(m);
+    i = best + len;
+  }
+}
+
+function render() {
+  const { out, words } = filtered();
+  const distinct = new Set(out.map(r => r.frequence_mhz)).size;
+  $("count").textContent = `${out.length} résultat${out.length > 1 ? "s" : ""} · ${distinct} fréquence${distinct > 1 ? "s" : ""} différente${distinct > 1 ? "s" : ""}`;
+  const tb = $("rows"); tb.replaceChildren();
+  for (const r of out.slice(0, shown)) {
+    const tr = document.createElement("tr");
+    const f = document.createElement("td"); f.className = "f"; f.textContent = fmtF(r.frequence_mhz) + " MHz";
+    const c = document.createElement("td"); c.className = "ctx"; highlight(c, r.contexte, words);
+    const s = document.createElement("td"); const a = document.createElement("a");
+    a.href = r.lien; a.target = "_blank"; a.rel = "noopener"; highlight(a, r.sujet, words); s.append(a);
+    const sec = document.createElement("td"); sec.className = "meta"; sec.textContent = sectionName(r.section);
+    const d = document.createElement("td"); d.className = "meta"; d.textContent = fmtD(r.date);
+    if (r.auteur) d.title = "par " + r.auteur;
+    tr.append(f, c, s, sec, d); tb.append(tr);
+  }
+  $("more").hidden = out.length <= shown;
+  document.querySelectorAll("th").forEach(th =>
+    th.querySelector(".arrow").textContent = th.dataset.k === sortKey ? (sortDir > 0 ? "▲" : "▼") : "");
+}
+
+document.querySelectorAll("th").forEach(th => th.onclick = () => {
+  sortDir = th.dataset.k === sortKey ? -sortDir : 1; sortKey = th.dataset.k; render();
+});
+for (const id of ["q", "section", "fmin", "fmax", "dedup"]) $(id).addEventListener("input", () => {
+  if (id === "fmin" || id === "fmax") { band = null; document.querySelectorAll(".chip").forEach(c => c.classList.remove("on")); }
+  shown = PAGE; render();
+});
+$("more").onclick = () => { shown += PAGE; render(); };
+render();
+</script>
+</body>
+</html>
