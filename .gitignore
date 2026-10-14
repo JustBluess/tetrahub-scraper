@@ -1,0 +1,10 @@
+# Cookie de connexion au forum : ne jamais publier
+session.json
+
+# Données récupérées
+etat.json
+frequences.csv
+frequences.json
+
+__pycache__/
+*.pyc
