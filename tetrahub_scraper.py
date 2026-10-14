@@ -129,18 +129,32 @@ class TetraHub:
                 for a in soup.select("a.forumtitle, a.subforum")]
 
     def topics(self, forum_slug):
-        """Parcourt toutes les pages d'une section et renvoie (titre, url) des sujets."""
+        """Parcourt toutes les pages d'une section et renvoie (titre, url, empreinte) des sujets.
+
+        L'empreinte (nombre de réponses + date du dernier message) change dès qu'un
+        message est ajouté : elle permet de ne rouvrir que les sujets modifiés.
+        """
         url = f"{forum_slug}/"
         seen = set()
         while url:
             soup = self.get(url)
             if "pas les permissions" in soup.get_text():
                 raise PermissionError(f"Accès refusé à la section {forum_slug}")
-            for a in soup.select("a.topictitle"):
+            for row in soup.select("li.row"):
+                a = row.select_one("a.topictitle")
+                if a is None:
+                    continue
                 t = clean_url(a["href"])
-                if t not in seen:
-                    seen.add(t)
-                    yield a.get_text(strip=True), t
+                if t in seen:
+                    continue
+                seen.add(t)
+                replies = row.select_one("dd.posts")
+                last = row.select_one("dd.lastpost time")
+                fingerprint = "|".join([
+                    replies.get_text(" ", strip=True) if replies else "",
+                    last.get("datetime", "") if last else "",
+                ])
+                yield a.get_text(strip=True), t, fingerprint
             nxt = soup.select_one(".pagination a[rel=next], .pagination li.next a")
             url = clean_url(nxt["href"]) if nxt else None
 
@@ -206,6 +220,7 @@ def main():
     ap.add_argument("--delay", type=float, default=1.5, help="pause entre deux pages, en secondes")
     ap.add_argument("--out", default="frequences", help="préfixe des fichiers de sortie")
     ap.add_argument("--state", default="etat.json", help="fichier mémorisant les messages déjà traités")
+    ap.add_argument("--full", action="store_true", help="rouvre tous les sujets, même inchangés")
     ap.add_argument("--cookies", default="session.json", help="fichier gardant la connexion (supprime-le pour te déconnecter)")
     args = ap.parse_args()
 
@@ -228,10 +243,12 @@ def main():
         hub.save_cookies(args.cookies)
         print("Connecté.")
 
-    state = {"posts": []}
+    state = {"posts": [], "topics": {}}
     if os.path.exists(args.state):
-        state = json.load(open(args.state, encoding="utf-8"))
+        state.update(json.load(open(args.state, encoding="utf-8")))
     done = set(state["posts"])
+    topic_marks = {} if args.full else state["topics"]
+    skipped = 0
 
     json_path = f"{args.out}.json"
     results = json.load(open(json_path, encoding="utf-8")) if os.path.exists(json_path) else []
@@ -241,9 +258,12 @@ def main():
         for forum in args.forums:
             print(f"\n== Section {forum}")
             try:
-                for n, (title, turl) in enumerate(hub.topics(forum), 1):
+                for n, (title, turl, mark) in enumerate(hub.topics(forum), 1):
                     if args.max_topics and n > args.max_topics:
                         break
+                    if mark and topic_marks.get(turl) == mark:
+                        skipped += 1  # aucun nouveau message depuis la dernière fois
+                        continue
                     print(f"  [{n}] {title}")
                     try:
                         for post in hub.posts(turl):
@@ -254,6 +274,8 @@ def main():
                             results.extend(rows)
                             new += len(rows)
                             done.add(key)
+                        # mémorisé seulement si le sujet a été lu en entier
+                        topic_marks[turl] = mark
                     except PermissionError as e:
                         print(f"      ! {e}")
             except PermissionError as e:
@@ -262,14 +284,15 @@ def main():
         print("\nInterrompu, sauvegarde de ce qui a été récupéré...")
     finally:
         json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        json.dump({"posts": sorted(done)}, open(args.state, "w", encoding="utf-8"))
+        json.dump({"posts": sorted(done), "topics": topic_marks}, open(args.state, "w", encoding="utf-8"))
         fields = ["section", "sujet", "frequence_mhz", "texte_trouve", "contexte", "auteur", "date", "lien"]
         # utf-8-sig + ";" pour que le fichier s'ouvre directement dans Excel (version FR)
         with open(f"{args.out}.csv", "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
             w.writeheader()
             w.writerows(results)
-        print(f"\n{new} nouvelles fréquences, {len(results)} au total -> {args.out}.csv / {json_path}")
+        print(f"\n{skipped} sujets inchangés ignorés")
+        print(f"{new} nouvelles fréquences, {len(results)} au total -> {args.out}.csv / {json_path}")
 
 
 if __name__ == "__main__":
