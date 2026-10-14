@@ -45,11 +45,19 @@
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 13px; }
   .pill.ok { background: var(--ok-soft); color: var(--ok); }
   .pill.warn { background: var(--warn-soft); color: var(--warn); }
-  .cat { margin-top: 14px; }
+  .cat { margin-top: 10px; }
   .cat:first-of-type { margin-top: 4px; }
-  .cat-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600;
-              padding-bottom: 4px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .cat-head { display: flex; gap: 8px; align-items: center; font-weight: 600; cursor: pointer; list-style: none;
+              padding: 5px 2px; border-bottom: 1px solid var(--border); margin-bottom: 4px; user-select: none; }
+  .cat-head::-webkit-details-marker { display: none; }
+  .cat-head:hover { color: var(--accent); }
+  .cat-head .chev { display: inline-block; width: 12px; color: var(--muted); transition: transform .15s; }
+  .cat[open] > .cat-head .chev { transform: rotate(90deg); }
+  .cat-head .title { flex: 1; }
+  .cat-head .badge { font-size: 12px; font-weight: 400; color: var(--muted); }
+  .cat-head .badge.on { color: var(--accent); }
   .cat-head button { padding: 1px 8px; font-size: 12px; font-weight: 400; }
+  .cat:not([open]) > .cat-head { margin-bottom: 0; }
   .sec { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 4px 2px;
          border-radius: 5px; cursor: pointer; }
   .sec:hover { background: var(--bg); }
@@ -90,6 +98,8 @@
     <div class="toolbar">
       <button id="selRec">Sections conseillées</button>
       <button id="selNone">Tout décocher</button>
+      <button id="openAll">Tout déplier</button>
+      <button id="closeAll">Tout replier</button>
     </div>
     <div id="sections" class="muted">Chargement des sections…</div>
   </section>
@@ -147,7 +157,17 @@ async function api(path, body) {
 }
 
 function selected() { return [...document.querySelectorAll("#sections input:checked")].map(i => i.value); }
-function saveSelection() { store.set("forums", selected()); estimate(); }
+function saveSelection() { store.set("forums", selected()); updateBadges(); estimate(); }
+
+// "N cochées" dans l'en-tête de chaque catégorie, utile quand elle est repliée
+function updateBadges() {
+  for (const cat of document.querySelectorAll("#sections .cat")) {
+    const n = cat.querySelectorAll("input:checked").length;
+    const b = cat.querySelector(".badge");
+    b.textContent = n ? `${n} cochée${n > 1 ? "s" : ""}` : "";
+    b.classList.toggle("on", n > 0);
+  }
+}
 
 function buildSections() {
   const box = $("sections"); box.replaceChildren(); box.classList.remove("muted");
@@ -157,13 +177,24 @@ function buildSections() {
   const cats = [...new Set(S.forums.map(f => f.category))]
     .map((c, i) => [c, i - 1000 * S.forums.filter(f => f.category === c && rec.has(f.slug)).length])
     .sort((a, b) => a[1] - b[1]).map(x => x[0]);
+  const openState = store.get("open", {});
   for (const cat of cats) {
-    const wrap = document.createElement("div"); wrap.className = "cat";
-    const head = document.createElement("div"); head.className = "cat-head";
-    const title = document.createElement("span"); title.textContent = cat;
+    // repliée par défaut si elle ne contient aucune section conseillée ; ensuite on retient le choix
+    const wrap = document.createElement("details"); wrap.className = "cat";
+    wrap.open = cat in openState ? openState[cat] : S.forums.some(f => f.category === cat && rec.has(f.slug));
+    wrap.ontoggle = () => { const o = store.get("open", {}); o[cat] = wrap.open; store.set("open", o); };
+    const head = document.createElement("summary"); head.className = "cat-head";
+    const chev = document.createElement("span"); chev.className = "chev"; chev.textContent = "›";
+    const title = document.createElement("span"); title.className = "title"; title.textContent = cat;
+    const badge = document.createElement("span"); badge.className = "badge";
     const all = document.createElement("button"); all.textContent = "tout";
-    all.onclick = () => { wrap.querySelectorAll("input").forEach(i => i.checked = true); saveSelection(); };
-    head.append(title, all); wrap.append(head);
+    all.onclick = e => {
+      e.preventDefault();  // ne pas replier/déplier en cliquant sur "tout"
+      const boxes = [...wrap.querySelectorAll("input")];
+      const check = !boxes.every(i => i.checked);   // 2e clic = tout décocher
+      boxes.forEach(i => i.checked = check); saveSelection();
+    };
+    head.append(chev, title, badge, all); wrap.append(head);
     for (const f of S.forums.filter(f => f.category === cat)) {
       const l = document.createElement("label"); l.className = "sec" + (f.sub ? " sub" : "");
       const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = f.slug; cb.checked = chosen.has(f.slug);
@@ -176,6 +207,7 @@ function buildSections() {
     box.append(wrap);
   }
   built = true;
+  updateBadges();
 }
 
 function updateProgress() {
@@ -291,6 +323,8 @@ $("start").onclick = async () => {
 $("stop").onclick = async () => { try { S = await api("/api/stop", {}); render(); } catch (e) { $("err").textContent = e.message; } };
 $("selRec").onclick = () => { document.querySelectorAll("#sections input").forEach(i => i.checked = S.recommended.includes(i.value)); saveSelection(); };
 $("selNone").onclick = () => { document.querySelectorAll("#sections input").forEach(i => i.checked = false); saveSelection(); };
+$("openAll").onclick = () => document.querySelectorAll("#sections .cat").forEach(d => d.open = true);
+$("closeAll").onclick = () => document.querySelectorAll("#sections .cat").forEach(d => d.open = false);
 $("delay").value = store.get("delay", 5); $("maxPages").value = store.get("maxPages", 300);
 $("delay").oninput = $("maxPages").oninput = estimate;
 refresh();
