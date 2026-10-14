@@ -26,4 +26,5 @@ Le mot de passe n'est jamais enregistré. Supprimer `session.json` pour se déco
 
 - `frequences.csv` / `frequences.json` : une ligne par fréquence trouvée (fréquence en MHz, phrase
   d'origine, section, sujet, auteur, date, lien vers le message).
-- `etat.json` : messages déjà traités ; une relance ne récupère que les nouveautés.
+- `etat.json` : messages déjà traités et « empreinte » de chaque sujet (nombre de réponses + date du
+  dernier message). Une relance n'ouvre que les sujets qui ont changé ; `--full` force à tout rouvrir.
