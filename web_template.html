@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TetraHub Scanner</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --text: #1d2330; --muted: #657083; --border: #dfe3ea;
+    --accent: #2563eb; --accent-soft: #e7eefe; --ok: #15803d; --ok-soft: #e3f4e8;
+    --warn: #b45309; --warn-soft: #fdf1dc; --danger: #b91c1c;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12151b; --surface: #1a1f27; --text: #e6e9ef; --muted: #8e98a8; --border: #2c333f;
+            --accent: #6b9bff; --accent-soft: #1f2b45; --ok: #4ade80; --ok-soft: #173024;
+            --warn: #fbbf24; --warn-soft: #3a2c0f; --danger: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+           padding: 18px 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  h1 { margin: 0; font-size: 19px; }
+  h2 { margin: 0 0 10px; font-size: 15px; }
+  .links { display: flex; gap: 8px; flex-wrap: wrap; }
+  main { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 18px; padding: 18px 24px 32px;
+         max-width: 1300px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 14px 16px; } }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .stack { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  button, .btn { font: inherit; border-radius: 7px; padding: 7px 14px; cursor: pointer; text-decoration: none;
+                 border: 1px solid var(--border); background: var(--surface); color: var(--text); display: inline-block; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.stop { border-color: var(--danger); color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], input[type=password], input[type=number] {
+    font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 9px; width: 100%; }
+  label.field { display: flex; flex-direction: column; gap: 4px; font-weight: 500; }
+  .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+  .row > * { flex: 1 1 140px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 13px; }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .cat { margin-top: 14px; }
+  .cat:first-of-type { margin-top: 4px; }
+  .cat-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600;
+              padding-bottom: 4px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .cat-head button { padding: 1px 8px; font-size: 12px; font-weight: 400; }
+  .sec { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 4px 2px;
+         border-radius: 5px; cursor: pointer; }
+  .sec:hover { background: var(--bg); }
+  .sec.sub { padding-left: 22px; }
+  .sec .meta { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+  .sec .rec { color: var(--accent); font-size: 11.5px; margin-left: 6px; }
+  .bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 3px; width: 70px; }
+  .bar > i { display: block; height: 100%; background: var(--ok); }
+  .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+  .toolbar button { padding: 3px 10px; font-size: 13px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+  .stat { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  @media (max-width: 480px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .estimate { background: var(--accent-soft); border-radius: 7px; padding: 8px 10px; margin: 10px 0; font-size: 13px; }
+  .log { font-family: var(--mono); font-size: 12px; background: var(--bg); border-radius: 7px; padding: 8px 10px;
+         height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .error { color: var(--danger); margin-top: 8px; min-height: 1em; }
+  label.chk { display: flex; gap: 6px; align-items: center; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>TetraHub Scanner</h1>
+    <div class="muted small" id="summary">Chargement…</div>
+  </div>
+  <div class="links">
+    <a class="btn" href="/frequences" target="_blank" id="view">Voir les fréquences</a>
+    <a class="btn" href="/frequences.csv">Télécharger le CSV</a>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Sections à scanner</h2>
+    <div class="toolbar">
+      <button id="selRec">Sections conseillées</button>
+      <button id="selNone">Tout décocher</button>
+    </div>
+    <div id="sections" class="muted">Chargement des sections…</div>
+  </section>
+
+  <div class="stack">
+    <section class="card" id="account">
+      <h2>Compte TetraHub</h2>
+      <div id="accountBody"></div>
+    </section>
+
+    <section class="card">
+      <h2>Scan</h2>
+      <div class="row">
+        <label class="field">Pause entre deux pages (s)
+          <input id="delay" type="number" min="1.5" step="0.5" value="5"></label>
+        <label class="field">Pages max par scan (0 = illimité)
+          <input id="maxPages" type="number" min="0" step="50" value="300"></label>
+      </div>
+      <label class="chk small" style="margin-top:10px"><input id="full" type="checkbox">
+        Rouvrir aussi les sujets inchangés</label>
+      <div class="estimate" id="estimate"></div>
+      <div class="row" style="align-items:center">
+        <button class="primary" id="start">Lancer le scan</button>
+        <button class="stop" id="stop" hidden>Arrêter</button>
+      </div>
+      <div class="error" id="err"></div>
+
+      <div class="stats">
+        <div class="stat"><b id="sPages">–</b><span>pages lues</span></div>
+        <div class="stat"><b id="sTopics">–</b><span>sujets lus</span></div>
+        <div class="stat"><b id="sSkipped">–</b><span>inchangés</span></div>
+        <div class="stat"><b id="sNew">–</b><span>nouvelles fréq.</span></div>
+      </div>
+      <div class="muted small" id="phase"></div>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("th_" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("th_" + k, JSON.stringify(v)); } catch {} },
+};
+let S = null, built = false, poll = null;
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json", "X-TetraHub": "1" }, body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || "Erreur");
+  return data;
+}
+
+function selected() { return [...document.querySelectorAll("#sections input:checked")].map(i => i.value); }
+function saveSelection() { store.set("forums", selected()); estimate(); }
+
+function buildSections() {
+  const box = $("sections"); box.replaceChildren(); box.classList.remove("muted");
+  const chosen = new Set(store.get("forums", S.recommended));
+  const rec = new Set(S.recommended);
+  // les catégories qui contiennent des sections conseillées passent en premier
+  const cats = [...new Set(S.forums.map(f => f.category))]
+    .map((c, i) => [c, i - 1000 * S.forums.filter(f => f.category === c && rec.has(f.slug)).length])
+    .sort((a, b) => a[1] - b[1]).map(x => x[0]);
+  for (const cat of cats) {
+    const wrap = document.createElement("div"); wrap.className = "cat";
+    const head = document.createElement("div"); head.className = "cat-head";
+    const title = document.createElement("span"); title.textContent = cat;
+    const all = document.createElement("button"); all.textContent = "tout";
+    all.onclick = () => { wrap.querySelectorAll("input").forEach(i => i.checked = true); saveSelection(); };
+    head.append(title, all); wrap.append(head);
+    for (const f of S.forums.filter(f => f.category === cat)) {
+      const l = document.createElement("label"); l.className = "sec" + (f.sub ? " sub" : "");
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = f.slug; cb.checked = chosen.has(f.slug);
+      cb.onchange = saveSelection;
+      const name = document.createElement("span"); name.textContent = f.name;
+      if (rec.has(f.slug)) { const r = document.createElement("span"); r.className = "rec"; r.textContent = "conseillée"; name.append(r); }
+      const meta = document.createElement("span"); meta.className = "meta"; meta.dataset.slug = f.slug;
+      l.append(cb, name, meta); wrap.append(l);
+    }
+    box.append(wrap);
+  }
+  built = true;
+}
+
+function updateProgress() {
+  for (const m of document.querySelectorAll(".sec .meta")) {
+    const f = S.forums.find(x => x.slug === m.dataset.slug);
+    const read = S.progress[m.dataset.slug] || 0;
+    m.replaceChildren();
+    if (f.topics) {
+      m.append(`${Math.min(read, f.topics)} / ${f.topics} sujets`);
+      const bar = document.createElement("div"); bar.className = "bar";
+      const i = document.createElement("i"); i.style.width = Math.min(100, 100 * read / f.topics) + "%";
+      bar.append(i); m.append(bar);
+    } else if (read) {
+      m.textContent = `${read} sujets lus`;
+    }
+  }
+}
+
+function estimate() {
+  if (!S) return;
+  const delay = Math.max(1.5, parseFloat($("delay").value) || 5);
+  const maxPages = parseInt($("maxPages").value) || 0;
+  let pages = 0, unknown = false;
+  for (const slug of selected()) {
+    const f = S.forums.find(x => x.slug === slug);
+    if (!f || !f.topics) { unknown = true; continue; }
+    const left = Math.max(0, f.topics - (S.progress[slug] || 0));
+    pages += Math.ceil(f.topics / 40) + Math.round(left * 1.5);   // listes + ~1,5 page par sujet à lire
+  }
+  const capped = maxPages && pages > maxPages;
+  const p = capped ? maxPages : pages;
+  const min = Math.round(p * (delay + 0.5) / 60);
+  const txt = selected().length === 0 ? "Aucune section cochée." :
+    `Environ ${pages} pages à lire${unknown ? " (+ sous-sections)" : ""}` +
+    (capped ? ` : ce scan s'arrêtera à ${maxPages} pages (≈ ${min || "< 1"} min), la suite au prochain.`
+            : ` ≈ ${min || "< 1"} min.`) +
+    (delay < 4 ? " Une pause courte charge davantage le forum." : "");
+  $("estimate").textContent = txt;
+}
+
+let accountKey = null;
+function renderAccount() {
+  // reconstruit seulement si l'état change, sinon on effacerait ce que l'utilisateur est en train de taper
+  const key = `${S.user}|${S.running}`;
+  if (key === accountKey) return;
+  accountKey = key;
+  const b = $("accountBody"); b.replaceChildren();
+  if (S.user) {
+    const p = document.createElement("div"); p.className = "row"; p.style.alignItems = "center";
+    const pill = document.createElement("span"); pill.className = "pill ok"; pill.textContent = "Connecté : " + S.user;
+    const out = document.createElement("button"); out.textContent = "Se déconnecter"; out.style.flex = "0 0 auto";
+    out.disabled = S.running;
+    out.onclick = async () => { try { S = await api("/api/logout", {}); render(); } catch (e) { $("err").textContent = e.message; } };
+    p.append(pill, out); b.append(p);
+    return;
+  }
+  const form = document.createElement("form");
+  form.innerHTML = `<div class="row">
+      <label class="field">Pseudo<input type="text" name="u" autocomplete="username" required></label>
+      <label class="field">Mot de passe<input type="password" name="p" autocomplete="current-password" required></label>
+      <button class="primary" style="flex:0 0 auto">Se connecter</button></div>
+    <div class="muted small" style="margin-top:8px">Le mot de passe n'est pas enregistré : seule la connexion est gardée (session.json).</div>`;
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const btn = form.querySelector("button"); btn.disabled = true; btn.textContent = "Connexion…"; $("err").textContent = "";
+    try { S = await api("/api/login", { username: form.u.value, password: form.p.value }); render(); }
+    catch (err) { $("err").textContent = err.message; btn.disabled = false; btn.textContent = "Se connecter"; form.p.value = ""; }
+  };
+  const warn = document.createElement("div"); warn.className = "pill warn"; warn.style.marginBottom = "10px";
+  warn.textContent = "Pas connecté : le forum exige un compte pour lire les sujets";
+  b.append(warn, form);
+}
+
+function render() {
+  if (!S) return;
+  $("summary").textContent = `${S.frequencies} fréquences enregistrées` + (S.user ? ` · ${S.user}` : "");
+  $("view").textContent = `Voir les fréquences (${S.frequencies})`;
+  if (!built && S.forums.length) buildSections();
+  if (built) updateProgress();
+  renderAccount();
+  const st = S.stats || {};
+  $("sPages").textContent = S.started ? S.pages : "–";
+  $("sTopics").textContent = st.topics ?? "–";
+  $("sSkipped").textContent = st.skipped ?? "–";
+  $("sNew").textContent = st.new ?? "–";
+  $("start").hidden = S.running; $("start").disabled = !S.user;
+  $("stop").hidden = !S.running; $("stop").disabled = S.stopping;
+  $("stop").textContent = S.stopping ? "Arrêt en cours…" : "Arrêter";
+  $("phase").textContent = S.running
+    ? `En cours depuis ${Math.round((Date.now() / 1000 - S.started) / 60)} min — section : ${st.forum || "…"}`
+    : S.finished ? `Terminé à ${new Date(S.finished * 1000).toLocaleTimeString("fr-FR")}` : "";
+  const log = $("log"), atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
+  log.textContent = S.log.join("\n") || "Le journal du scan s'affichera ici.";
+  if (atBottom) log.scrollTop = log.scrollHeight;
+  estimate();
+  clearTimeout(poll); poll = setTimeout(refresh, S.running ? 1000 : 5000);
+}
+
+async function refresh() {
+  try { S = await api("/api/status"); render(); }
+  catch { $("summary").textContent = "Serveur arrêté : relance python web.py"; clearTimeout(poll); poll = setTimeout(refresh, 5000); }
+}
+
+$("start").onclick = async () => {
+  $("err").textContent = "";
+  store.set("delay", $("delay").value); store.set("maxPages", $("maxPages").value);
+  try {
+    S = await api("/api/scan", { forums: selected(), delay: parseFloat($("delay").value),
+                                 max_pages: parseInt($("maxPages").value) || 0, full: $("full").checked });
+    render();
+  } catch (e) { $("err").textContent = e.message; }
+};
+$("stop").onclick = async () => { try { S = await api("/api/stop", {}); render(); } catch (e) { $("err").textContent = e.message; } };
+$("selRec").onclick = () => { document.querySelectorAll("#sections input").forEach(i => i.checked = S.recommended.includes(i.value)); saveSelection(); };
+$("selNone").onclick = () => { document.querySelectorAll("#sections input").forEach(i => i.checked = false); saveSelection(); };
+$("delay").value = store.get("delay", 5); $("maxPages").value = store.get("maxPages", 300);
+$("delay").oninput = $("maxPages").oninput = estimate;
+refresh();
+</script>
+</body>
+</html>

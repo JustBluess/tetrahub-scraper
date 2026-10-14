@@ -79,6 +79,10 @@ def parse_frequencies(text):
     return found
 
 
+class StopScan(Exception):
+    """Arrêt demandé (bouton Arrêter, ou limite de pages atteinte)."""
+
+
 class TetraHub:
     def __init__(self, delay=1.5):
         self.s = requests.Session()
@@ -87,9 +91,20 @@ class TetraHub:
             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
         )
         self.delay = delay
+        self.pages = 0          # pages téléchargées depuis le début du scan
+        self.max_pages = 0      # 0 = pas de limite
+        self.should_stop = lambda: False
 
     def get(self, url):
-        time.sleep(self.delay)  # rester poli avec le serveur
+        if self.max_pages and self.pages >= self.max_pages:
+            raise StopScan(f"Limite de {self.max_pages} pages atteinte, la suite au prochain scan")
+        # pause pour rester poli avec le serveur, découpée pour réagir vite au bouton Arrêter
+        end = time.monotonic() + self.delay
+        while time.monotonic() < end:
+            if self.should_stop():
+                raise StopScan("Scan arrêté")
+            time.sleep(min(0.2, max(0, end - time.monotonic())))
+        self.pages += 1
         r = self.s.get(urljoin(BASE, url), timeout=30)
         soup = BeautifulSoup(r.text, "html.parser")
         if r.status_code == 403:
@@ -116,7 +131,16 @@ class TetraHub:
             raise RuntimeError("Connexion échouée" + (f" : {err.get_text(strip=True)}" if err else ""))
 
     def is_logged_in(self):
-        return "mode=logout" in self.s.get(BASE, timeout=30).text
+        return self.whoami() is not None
+
+    def whoami(self):
+        """Pseudo du compte connecté, ou None."""
+        html = self.s.get(BASE, timeout=30).text
+        if "mode=logout" not in html:
+            return None
+        name = BeautifulSoup(html, "html.parser").select_one("#username_logged_in .username, "
+                                                            "#username_logged_in .username-coloured")
+        return name.get_text(strip=True) if name else "?"
 
     def save_cookies(self, path):
         json.dump(requests.utils.dict_from_cookiejar(self.s.cookies), open(path, "w", encoding="utf-8"))
@@ -126,9 +150,25 @@ class TetraHub:
             self.s.cookies.update(json.load(open(path, encoding="utf-8")))
 
     def list_forums(self):
-        soup = self.get("")
-        return [(urlparse(clean_url(a["href"])).path.strip("/"), a.get_text(strip=True))
-                for a in soup.select("a.forumtitle, a.subforum")]
+        """Sections du forum : [{slug, name, category, topics, sub}] (topics = None pour une sous-section)."""
+        soup = BeautifulSoup(self.s.get(BASE, timeout=30).text, "html.parser")
+        slug = lambda a: urlparse(clean_url(a["href"])).path.strip("/")
+        forums = []
+        for block in soup.select("div.forabg"):
+            head = block.select_one("li.header a, li.header dt")
+            category = head.get_text(strip=True) if head else ""
+            for row in block.select("li.row"):
+                a = row.select_one("a.forumtitle")
+                if a is None:
+                    continue
+                count = row.select_one("dd.topics")
+                digits = re.sub(r"\D", "", count.get_text()) if count else ""
+                forums.append({"slug": slug(a), "name": a.get_text(strip=True), "category": category,
+                               "topics": int(digits) if digits else None, "sub": False})
+                for sub in row.select("a.subforum"):
+                    forums.append({"slug": slug(sub), "name": sub.get_text(strip=True), "category": category,
+                                   "topics": None, "sub": True})
+        return forums
 
     def topics(self, forum_slug):
         """Parcourt toutes les pages d'une section et renvoie (titre, url, empreinte) des sujets.
@@ -221,7 +261,12 @@ SECTION_NAMES = {
     "maritime": "Maritime",
     "freq-ondes-courtes": "Ondes courtes",
     "freq-frequences-etrangeres": "Fréquences étrangères",
+    "decodage-donnees-analogique-numerique": "Décodage données",
+    "digital-audio-broadcasting-dab": "DAB",
 }
+
+# Sections conseillées : "Spectre radio" + les deux sections de décodage riches en fréquences
+RECOMMENDED_FORUMS = DEFAULT_FORUMS + ["decodage-donnees-analogique-numerique", "digital-audio-broadcasting-dab"]
 
 
 def load_results(path):
@@ -232,8 +277,8 @@ def load_results(path):
     return [r for r in json.load(open(path, encoding="utf-8")) if parse_frequencies(r["texte_trouve"])]
 
 
-def write_html(results, path):
-    """Génère une page autonome (recherche, filtres, tri) à ouvrir dans le navigateur."""
+def render_html(results, section_names=None):
+    """Page autonome (recherche, filtres, tri) contenant les résultats."""
     template = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "page_template.html"),
                     encoding="utf-8").read()
 
@@ -241,9 +286,81 @@ def write_html(results, path):
         # "</" empêcherait la balise <script> de se fermer au bon endroit
         return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
 
-    meta = {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"), "sections": SECTION_NAMES}
-    page = template.replace("__DATA__", embed(results)).replace("__META__", embed(meta))
-    open(path, "w", encoding="utf-8").write(page)
+    meta = {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"), "sections": section_names or SECTION_NAMES}
+    return template.replace("__DATA__", embed(results)).replace("__META__", embed(meta))
+
+
+def write_html(results, path):
+    open(path, "w", encoding="utf-8").write(render_html(results))
+
+
+def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_topics=0,
+         log=print, stats=None):
+    """Parcourt les sections et enregistre les résultats (même en cas d'arrêt ou d'erreur).
+
+    `stats` est mis à jour au fil de l'eau, ce qui permet à l'interface web d'afficher la progression.
+    """
+    stats = stats if stats is not None else {}
+    stats.update(new=0, skipped=0, topics=0, forum="", total=0)
+
+    state = {"posts": [], "topics": {}}
+    if os.path.exists(state_path):
+        state.update(json.load(open(state_path, encoding="utf-8")))
+    done = set(state["posts"])
+    topic_marks = {} if full else state["topics"]
+
+    json_path = f"{out}.json"
+    results = load_results(json_path)
+
+    try:
+        for forum in forums:
+            stats["forum"] = forum
+            log(f"== Section {SECTION_NAMES.get(forum, forum)}")
+            try:
+                for n, (title, turl, mark) in enumerate(hub.topics(forum), 1):
+                    if max_topics and n > max_topics:
+                        break
+                    if mark and topic_marks.get(turl) == mark:
+                        stats["skipped"] += 1  # aucun nouveau message depuis la dernière fois
+                        continue
+                    log(f"  [{n}] {title}")
+                    try:
+                        found = 0
+                        for post in hub.posts(turl):
+                            key = f"{turl}#{post['id']}"
+                            if key in done:
+                                continue
+                            rows = extract(forum, title, turl, post)
+                            results.extend(rows)
+                            found += len(rows)
+                            done.add(key)
+                        # mémorisé seulement si le sujet a été lu en entier
+                        topic_marks[turl] = mark
+                        stats["topics"] += 1
+                        stats["new"] += found
+                        if found:
+                            log(f"      +{found} fréquences")
+                    except PermissionError as e:
+                        log(f"      ! {e}")
+            except PermissionError as e:
+                log(f"  ! {e}")
+    except StopScan as e:
+        log(str(e))
+    finally:
+        json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        json.dump({"posts": sorted(done), "topics": topic_marks}, open(state_path, "w", encoding="utf-8"))
+        fields = ["section", "sujet", "frequence_mhz", "texte_trouve", "contexte", "auteur", "date", "lien"]
+        # utf-8-sig + ";" pour que le fichier s'ouvre directement dans Excel (version FR)
+        with open(f"{out}.csv", "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
+            w.writeheader()
+            w.writerows(results)
+        write_html(results, f"{out}.html")
+        stats["total"] = len(results)
+        log(f"{stats['skipped']} sujets inchangés ignorés, {stats['topics']} sujets lus")
+        name = os.path.basename(out)
+        log(f"{stats['new']} nouvelles fréquences, {len(results)} au total -> {name}.html / .csv / .json")
+    return stats
 
 
 def main():
@@ -254,6 +371,7 @@ def main():
     ap.add_argument("--delay", type=float, default=1.5, help="pause entre deux pages, en secondes")
     ap.add_argument("--out", default="frequences", help="préfixe des fichiers de sortie")
     ap.add_argument("--state", default="etat.json", help="fichier mémorisant les messages déjà traités")
+    ap.add_argument("--max-pages", type=int, default=0, help="arrête le scan après N pages (0 = pas de limite)")
     ap.add_argument("--html-only", action="store_true", help="régénère seulement la page HTML, sans scanner")
     ap.add_argument("--full",action="store_true", help="rouvre tous les sujets, même inchangés")
     ap.add_argument("--cookies", default="session.json", help="fichier gardant la connexion (supprime-le pour te déconnecter)")
@@ -268,8 +386,8 @@ def main():
         return
 
     if args.list_forums:
-        for slug, name in hub.list_forums():
-            print(f"{slug:45} {name}")
+        for f in hub.list_forums():
+            print(f"{f['slug']:45} {'  ' if f['sub'] else ''}{f['name']}")
         return
 
     # On réutilise la connexion précédente si elle est encore valable : le mot de passe
@@ -284,57 +402,12 @@ def main():
         hub.save_cookies(args.cookies)
         print("Connecté.")
 
-    state = {"posts": [], "topics": {}}
-    if os.path.exists(args.state):
-        state.update(json.load(open(args.state, encoding="utf-8")))
-    done = set(state["posts"])
-    topic_marks = {} if args.full else state["topics"]
-    skipped = 0
-
-    json_path = f"{args.out}.json"
-    results = load_results(json_path)
-    new = 0
-
+    hub.max_pages = args.max_pages
     try:
-        for forum in args.forums:
-            print(f"\n== Section {forum}")
-            try:
-                for n, (title, turl, mark) in enumerate(hub.topics(forum), 1):
-                    if args.max_topics and n > args.max_topics:
-                        break
-                    if mark and topic_marks.get(turl) == mark:
-                        skipped += 1  # aucun nouveau message depuis la dernière fois
-                        continue
-                    print(f"  [{n}] {title}")
-                    try:
-                        for post in hub.posts(turl):
-                            key = f"{turl}#{post['id']}"
-                            if key in done:
-                                continue
-                            rows = extract(forum, title, turl, post)
-                            results.extend(rows)
-                            new += len(rows)
-                            done.add(key)
-                        # mémorisé seulement si le sujet a été lu en entier
-                        topic_marks[turl] = mark
-                    except PermissionError as e:
-                        print(f"      ! {e}")
-            except PermissionError as e:
-                print(f"  ! {e}")
+        scan(hub, args.forums, out=args.out, state_path=args.state, full=args.full,
+             max_topics=args.max_topics)
     except KeyboardInterrupt:
-        print("\nInterrompu, sauvegarde de ce qui a été récupéré...")
-    finally:
-        json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        json.dump({"posts": sorted(done), "topics": topic_marks}, open(args.state, "w", encoding="utf-8"))
-        fields = ["section", "sujet", "frequence_mhz", "texte_trouve", "contexte", "auteur", "date", "lien"]
-        # utf-8-sig + ";" pour que le fichier s'ouvre directement dans Excel (version FR)
-        with open(f"{args.out}.csv", "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
-            w.writeheader()
-            w.writerows(results)
-        write_html(results, f"{args.out}.html")
-        print(f"\n{skipped} sujets inchangés ignorés")
-        print(f"{new} nouvelles fréquences, {len(results)} au total -> {args.out}.html / .csv / .json")
+        print("\nInterrompu : ce qui a été récupéré est enregistré.")
 
 
 if __name__ == "__main__":

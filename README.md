@@ -9,13 +9,27 @@ et les range dans un fichier CSV (ouvrable dans Excel) et JSON.
 pip install requests beautifulsoup4
 ```
 
-## Utilisation
+## Interface web (le plus simple)
+
+```bash
+python web.py
+```
+
+Le navigateur s'ouvre sur http://127.0.0.1:8765 : connexion au compte, choix des sections (les
+sections conseillées sont cochées d'office), progression section par section, lancement et arrêt du
+scan, journal en direct, et accès au tableau des fréquences. Le serveur n'écoute que sur ta machine.
+
+Par défaut, un scan fait une pause de 5 s entre deux pages et s'arrête après 300 pages : relancer le
+lendemain reprend là où il s'était arrêté.
+
+## Ligne de commande
 
 ```bash
 python tetrahub_scraper.py                    # sections "Spectre radio"
 python tetrahub_scraper.py --max-topics 5     # test rapide
 python tetrahub_scraper.py --forums tetra dmr # sections choisies
 python tetrahub_scraper.py --list-forums      # liste des sections
+python tetrahub_scraper.py --delay 5 --max-pages 300   # scan doux, étalé sur plusieurs jours
 ```
 
 Le forum exige un compte. Au premier lancement, le script demande le pseudo et le mot de passe

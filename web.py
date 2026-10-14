@@ -1,0 +1,246 @@
+"""
+Interface web locale pour le scraper TetraHub.
+
+    python web.py
+
+puis ouvrir http://127.0.0.1:8765 (le navigateur s'ouvre tout seul).
+Le serveur n'écoute que sur ta machine : personne d'autre ne peut y accéder.
+"""
+
+import json
+import os
+import sys
+import threading
+import time
+import traceback
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)  # trouve tetrahub_scraper.py même si on lance web.py depuis un autre dossier
+import tetrahub_scraper as ts  # noqa: E402
+
+HOST, PORT = "127.0.0.1", 8765
+COOKIES = os.path.join(HERE, "session.json")
+OUT = os.path.join(HERE, "frequences")
+STATE = os.path.join(HERE, "etat.json")
+
+
+class App:
+    """État partagé entre le serveur web et le thread de scan."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.hub = ts.TetraHub()
+        self.hub.load_cookies(COOKIES)
+        self.user = None
+        self.forums = []
+        self.thread = None
+        self.stop = threading.Event()
+        self.log_lines = []
+        self.stats = {}
+        self.started = None
+        self.finished = None
+
+    def refresh(self):
+        """Vérifie la connexion et récupère la liste des sections (au démarrage)."""
+        try:
+            self.user = self.hub.whoami()
+        except Exception as e:
+            self.log(f"! Impossible de joindre le forum : {e}")
+        try:
+            self.forums = self.hub.list_forums()
+        except Exception as e:
+            self.log(f"! Impossible de lire la liste des sections : {e}")
+
+    def log(self, msg):
+        with self.lock:
+            self.log_lines.append(f"{time.strftime('%H:%M:%S')}  {msg}")
+            del self.log_lines[:-500]
+
+    @property
+    def running(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def start_scan(self, forums, delay, max_pages, full):
+        if self.running:
+            raise RuntimeError("Un scan est déjà en cours")
+        if not self.user:
+            raise RuntimeError("Connecte-toi d'abord")
+        known = {f["slug"] for f in self.forums}
+        forums = [f for f in forums if f in known]
+        if not forums:
+            raise RuntimeError("Choisis au moins une section")
+        self.hub.delay = max(1.5, float(delay))
+        self.hub.max_pages = max(0, int(max_pages))
+        self.hub.pages = 0
+        self.stop.clear()
+        self.hub.should_stop = self.stop.is_set
+        self.stats = {}
+        self.started, self.finished = time.time(), None
+        with self.lock:
+            self.log_lines.clear()
+
+        def run():
+            try:
+                ts.scan(self.hub, forums, out=OUT, state_path=STATE, full=full, log=self.log, stats=self.stats)
+            except Exception as e:
+                self.log(f"! Erreur : {e}")
+                traceback.print_exc()
+            finally:
+                self.finished = time.time()
+
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+
+    def status(self):
+        with self.lock:
+            log = list(self.log_lines)
+        return {
+            "user": self.user,
+            "forums": self.forums,
+            "recommended": ts.RECOMMENDED_FORUMS,
+            "running": self.running,
+            "stopping": self.running and self.stop.is_set(),
+            "pages": self.hub.pages,
+            "max_pages": self.hub.max_pages,
+            "stats": self.stats,
+            "started": self.started,
+            "finished": self.finished,
+            "log": log,
+            "frequencies": self.count_results(),
+            "progress": self.read_progress(),
+        }
+
+    _progress = (None, {})
+
+    def read_progress(self):
+        """Nombre de sujets déjà lus par section, d'après etat.json."""
+        mtime = os.path.getmtime(STATE) if os.path.exists(STATE) else None
+        if mtime != self._progress[0]:
+            topics = {}
+            if mtime:
+                state = json.load(open(STATE, encoding="utf-8"))
+                urls = {k.split("#")[0] for k in state.get("posts", [])} | set(state.get("topics", {}))
+                for u in urls:
+                    slug = u.replace(ts.BASE, "").split("/")[0]
+                    topics[slug] = topics.get(slug, 0) + 1
+            self._progress = (mtime, topics)
+        return self._progress[1]
+
+    _count = (None, 0)
+
+    def count_results(self):
+        """Nombre de fréquences enregistrées (relu seulement quand le fichier change)."""
+        path = f"{OUT}.json"
+        mtime = os.path.getmtime(path) if os.path.exists(path) else None
+        if mtime != self._count[0]:
+            self._count = (mtime, len(ts.load_results(path)))
+        return self._count[1]
+
+
+app = App()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass  # pas de ligne dans la console à chaque requête
+
+    def send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body if isinstance(body, bytes) else body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_json(self, obj, code=200):
+        self.send(code, json.dumps(obj, ensure_ascii=False))
+
+    def host_ok(self):
+        # refuse les requêtes qui n'arrivent pas par 127.0.0.1/localhost (protection "DNS rebinding")
+        return self.headers.get("Host", "") in (f"{HOST}:{PORT}", f"localhost:{PORT}")
+
+    def do_GET(self):
+        if not self.host_ok():
+            return self.send(403, "Forbidden", "text/plain")
+        path = self.path.split("?")[0]
+        if path == "/":
+            page = open(os.path.join(HERE, "web_template.html"), encoding="utf-8").read()
+            return self.send(200, page, "text/html; charset=utf-8")
+        if path == "/frequences":
+            names = {f["slug"]: f["name"] for f in app.forums} or None
+            page = ts.render_html(ts.load_results(f"{OUT}.json"), names)
+            return self.send(200, page, "text/html; charset=utf-8")
+        if path == "/frequences.csv" and os.path.exists(f"{OUT}.csv"):
+            self.send_response(200)
+            data = open(f"{OUT}.csv", "rb").read()
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="frequences.csv"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return self.wfile.write(data)
+        if path == "/api/status":
+            return self.send_json(app.status())
+        self.send(404, "Not found", "text/plain")
+
+    def do_POST(self):
+        # l'en-tête X-TetraHub ne peut pas être ajouté par un autre site sans autorisation du navigateur :
+        # ça empêche une page web quelconque de piloter le scan à ta place
+        if not self.host_ok() or self.headers.get("X-TetraHub") != "1":
+            return self.send(403, "Forbidden", "text/plain")
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self.send_json({"error": "Requête invalide"}, 400)
+        path = self.path.split("?")[0]
+        try:
+            if path == "/api/login":
+                if app.running:
+                    raise RuntimeError("Impossible pendant un scan")
+                app.hub.login(body.get("username", ""), body.get("password", ""))
+                app.hub.save_cookies(COOKIES)
+                app.user = app.hub.whoami()
+                app.log(f"Connecté en tant que {app.user}")
+            elif path == "/api/logout":
+                if app.running:
+                    raise RuntimeError("Impossible pendant un scan")
+                if os.path.exists(COOKIES):
+                    os.remove(COOKIES)
+                app.hub = ts.TetraHub()
+                app.user = None
+                app.log("Déconnecté (session.json supprimé)")
+            elif path == "/api/scan":
+                app.start_scan(body.get("forums", []), body.get("delay", 5),
+                               body.get("max_pages", 300), bool(body.get("full")))
+            elif path == "/api/stop":
+                app.stop.set()
+            else:
+                return self.send(404, "Not found", "text/plain")
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 400)
+        self.send_json(app.status())
+
+
+def main():
+    print("Vérification de la connexion au forum...")
+    app.refresh()
+    print(f"Connecté en tant que {app.user}" if app.user else "Pas connecté : connecte-toi depuis la page.")
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    url = f"http://{HOST}:{PORT}"
+    print(f"Interface prête sur {url}  (Ctrl+C pour quitter)")
+    if "--no-browser" not in sys.argv:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        app.stop.set()
+        if app.thread:
+            app.thread.join(timeout=10)  # laisse le scan enregistrer ce qu'il a récupéré
+        print("\nArrêté.")
+
+
+if __name__ == "__main__":
+    main()
