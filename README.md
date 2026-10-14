@@ -24,6 +24,9 @@ Le mot de passe n'est jamais enregistré. Supprimer `session.json` pour se déco
 
 ## Résultats
 
+- `frequences.html` : page à ouvrir dans le navigateur (double-clic) pour chercher, filtrer par
+  section ou par bande (aéro, marine, TETRA…) et trier. Recréée à chaque scan ;
+  `python tetrahub_scraper.py --html-only` la régénère sans scanner.
 - `frequences.csv` / `frequences.json` : une ligne par fréquence trouvée (fréquence en MHz, phrase
   d'origine, section, sujet, auteur, date, lien vers le message).
 - `etat.json` : messages déjà traités et « empreinte » de chaque sujet (nombre de réponses + date du

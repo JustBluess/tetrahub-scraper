@@ -5,6 +5,7 @@ session.json
 etat.json
 frequences.csv
 frequences.json
+frequences.html
 
 __pycache__/
 *.pyc
