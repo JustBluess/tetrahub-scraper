@@ -279,7 +279,7 @@ def load_results(path):
 
 def render_html(results, section_names=None):
     """Page autonome (recherche, filtres, tri) contenant les résultats."""
-    template = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "page_template.html"),
+    template = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tableau.html"),
                     encoding="utf-8").read()
 
     def embed(obj):
