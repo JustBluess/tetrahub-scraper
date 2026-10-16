@@ -29,19 +29,6 @@ Le navigateur s'ouvre sur http://127.0.0.1:8765. Tout se fait depuis cette page 
 
 `Ctrl+C` dans le terminal arrête le serveur ; un scan en cours enregistre d'abord ce qu'il a récupéré.
 
-## Sur Android
-
-Avec [Termux](https://f-droid.org/packages/com.termux/) (version F-Droid) :
-
-```bash
-pkg install -y python git gh && pip install requests beautifulsoup4
-gh auth login
-gh repo clone JustBluess/tetrahub-scraper
-cd ~/tetrahub-scraper && termux-wake-lock && python web.py --no-browser
-```
-
-Puis ouvrir http://127.0.0.1:8765 dans Chrome. Mise à jour : `git pull`.
-
 ## Fichiers créés
 
 Ils restent sur la machine et ne sont jamais envoyés sur GitHub (voir `.gitignore`).
