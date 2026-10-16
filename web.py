@@ -167,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, "Forbidden", "text/plain")
         path = self.path.split("?")[0]
         if path == "/":
-            page = open(os.path.join(HERE, "web_template.html"), encoding="utf-8").read()
+            page = open(os.path.join(HERE, "interface.html"), encoding="utf-8").read()
             return self.send(200, page, "text/html; charset=utf-8")
         if path == "/frequences":
             names = {f["slug"]: f["name"] for f in app.forums} or None
