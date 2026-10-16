@@ -29,13 +29,4 @@ Le navigateur s'ouvre sur http://127.0.0.1:8765. Tout se fait depuis cette page 
 
 `Ctrl+C` dans le terminal arrête le serveur ; un scan en cours enregistre d'abord ce qu'il a récupéré.
 
-## Fichiers créés
-
-Ils restent sur la machine et ne sont jamais envoyés sur GitHub (voir `.gitignore`).
-
-| Fichier | Contenu |
-|---|---|
-| `session.json` | connexion au forum — à ne pas partager ; le supprimer pour se déconnecter |
-| `frequences.html` | le tableau des fréquences, à ouvrir d'un double-clic (marche hors ligne) |
-| `frequences.csv` / `.json` | les mêmes données pour Excel ou d'autres programmes |
-| `etat.json` | ce qui a déjà été lu : une relance n'ouvre que les sujets qui ont de nouveaux messages |
+⚠️ Ne partage jamais `session.json` : il contient ta connexion au forum (le supprimer pour te déconnecter).
