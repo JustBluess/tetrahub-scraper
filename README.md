@@ -1,7 +1,7 @@
 # tetrahub-scraper
 
 Récupère automatiquement les fréquences radio publiées sur [forum.tetrahub.net](https://forum.tetrahub.net/)
-et les range dans un fichier CSV (ouvrable dans Excel) et JSON.
+et les affiche dans un tableau où l'on peut chercher, filtrer et trier.
 
 ## Installation
 
@@ -9,39 +9,46 @@ et les range dans un fichier CSV (ouvrable dans Excel) et JSON.
 pip install requests beautifulsoup4
 ```
 
-## Interface web (le plus simple)
+## Lancer
 
 ```bash
 python web.py
 ```
 
-Le navigateur s'ouvre sur http://127.0.0.1:8765 : connexion au compte, choix des sections (les
-sections conseillées sont cochées d'office), progression section par section, lancement et arrêt du
-scan, journal en direct, et accès au tableau des fréquences. Le serveur n'écoute que sur ta machine.
+Le navigateur s'ouvre sur http://127.0.0.1:8765. Tout se fait depuis cette page :
 
-Par défaut, un scan fait une pause de 5 s entre deux pages et s'arrête après 300 pages : relancer le
-lendemain reprend là où il s'était arrêté.
+1. **Se connecter** avec son compte TetraHub (le forum exige un compte pour lire les sujets).
+   Le mot de passe n'est jamais enregistré : seule la connexion est gardée dans `session.json`.
+2. **Cocher les sections** à scanner. Les sections conseillées sont cochées d'office ; chaque
+   section indique combien de sujets ont déjà été lus.
+3. **Lancer le scan** et suivre la progression en direct. Par défaut : 5 s de pause entre deux pages
+   et arrêt après 300 pages, pour ménager le forum. Relancer le lendemain reprend là où ça s'était arrêté.
+4. **Voir les fréquences** : tableau avec recherche, filtres par section et par bande (aéro, marine,
+   TETRA…), tri, et lien vers chaque message d'origine. Le bouton « Télécharger le CSV » donne les
+   mêmes données pour Excel.
 
-## Ligne de commande
+`Ctrl+C` dans le terminal arrête le serveur ; un scan en cours enregistre d'abord ce qu'il a récupéré.
+
+## Sur Android
+
+Avec [Termux](https://f-droid.org/packages/com.termux/) (version F-Droid) :
 
 ```bash
-python tetrahub_scraper.py                    # sections "Spectre radio"
-python tetrahub_scraper.py --max-topics 5     # test rapide
-python tetrahub_scraper.py --forums tetra dmr # sections choisies
-python tetrahub_scraper.py --list-forums      # liste des sections
-python tetrahub_scraper.py --delay 5 --max-pages 300   # scan doux, étalé sur plusieurs jours
+pkg install -y python git gh && pip install requests beautifulsoup4
+gh auth login
+gh repo clone JustBluess/tetrahub-scraper
+cd ~/tetrahub-scraper && termux-wake-lock && python web.py --no-browser
 ```
 
-Le forum exige un compte. Au premier lancement, le script demande le pseudo et le mot de passe
-(ou les lit dans `TETRAHUB_USER` / `TETRAHUB_PASS`), puis garde la connexion dans `session.json`.
-Le mot de passe n'est jamais enregistré. Supprimer `session.json` pour se déconnecter.
+Puis ouvrir http://127.0.0.1:8765 dans Chrome. Mise à jour : `git pull`.
 
-## Résultats
+## Fichiers créés
 
-- `frequences.html` : page à ouvrir dans le navigateur (double-clic) pour chercher, filtrer par
-  section ou par bande (aéro, marine, TETRA…) et trier. Recréée à chaque scan ;
-  `python tetrahub_scraper.py --html-only` la régénère sans scanner.
-- `frequences.csv` / `frequences.json` : une ligne par fréquence trouvée (fréquence en MHz, phrase
-  d'origine, section, sujet, auteur, date, lien vers le message).
-- `etat.json` : messages déjà traités et « empreinte » de chaque sujet (nombre de réponses + date du
-  dernier message). Une relance n'ouvre que les sujets qui ont changé ; `--full` force à tout rouvrir.
+Ils restent sur la machine et ne sont jamais envoyés sur GitHub (voir `.gitignore`).
+
+| Fichier | Contenu |
+|---|---|
+| `session.json` | connexion au forum — à ne pas partager ; le supprimer pour se déconnecter |
+| `frequences.html` | le tableau des fréquences, à ouvrir d'un double-clic (marche hors ligne) |
+| `frequences.csv` / `.json` | les mêmes données pour Excel ou d'autres programmes |
+| `etat.json` | ce qui a déjà été lu : une relance n'ouvre que les sujets qui ont de nouveaux messages |
