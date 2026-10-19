@@ -96,6 +96,23 @@ class NetworkError(Exception):
     """Page impossible à récupérer malgré plusieurs essais."""
 
 
+POSTS_PER_PAGE = 35         # messages par page de sujet sur TetraHub (réglage du forum)
+
+
+def topic_page(topic_url, start):
+    """Adresse de la page d'un sujet commençant au message n° `start` ("…-t3742.html" -> "…-t3742-35.html")."""
+    if not start:
+        return topic_url
+    url, n = re.subn(r"(-t\d+)\.html$", rf"\1-{start}.html", topic_url)
+    return url if n else topic_url
+
+
+def replies_in(mark):
+    """Nombre de réponses contenu dans une empreinte ("17 Réponses|2026-…"), ou None."""
+    m = re.match(r"\s*(\d+)", mark or "")
+    return int(m.group(1)) if m else None
+
+
 RETRY_WAITS = (5, 15, 45)   # secondes d'attente avant chaque nouvel essai après une erreur réseau
 MAX_DELAY = 60              # pause maximale entre deux pages quand le forum demande de ralentir
 MIN_RETRY_AFTER = 30        # attente minimale (s) quand le forum répond "trop de requêtes"
@@ -172,7 +189,9 @@ class TetraHub:
             # phpBB répond 403 quand le compte n'a pas le droit de lire : on récupère son message
             msg = soup.select_one("#message p, .panel p, h2")
             raise PermissionError(f"403 sur {r.url} : " + (msg.get_text(" ", strip=True) if msg else "accès refusé"))
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # ex. 404 : sujet supprimé entre la liste et la lecture -> on le saute, sans planter le scan
+            raise NetworkError(f"{r.url} : page introuvable (erreur {r.status_code})")
         return soup
 
     def login(self, username, password):
@@ -231,11 +250,15 @@ class TetraHub:
                                    "topics": None, "sub": True, "parent": slug(a)})
         return forums
 
-    def topics(self, forum_slug):
-        """Parcourt toutes les pages d'une section et renvoie (titre, url, empreinte) des sujets.
+    def topics(self, forum_slug, known=None):
+        """Parcourt les pages d'une section et renvoie (titre, url, empreinte) des sujets.
 
         L'empreinte (nombre de réponses + date du dernier message) change dès qu'un
         message est ajouté : elle permet de ne rouvrir que les sujets modifiés.
+
+        `known` (empreintes déjà vues) n'est donné que pour une section déjà lue en entier :
+        la liste étant triée du plus récent au plus ancien, le premier sujet non épinglé
+        inchangé veut dire que tous ceux d'en dessous le sont aussi, donc on s'arrête là.
         """
         url = f"{forum_slug}/"
         seen = set()
@@ -265,13 +288,16 @@ class TetraHub:
                     replies.get_text(" ", strip=True) if replies else "",
                     last.get("datetime", "") if last else "",
                 ])
+                pinned = {"sticky", "announce", "global-announce"} & set(row.get("class", []))
+                if known is not None and not pinned and known.get(t) == fingerprint:
+                    return  # le reste de la liste est plus ancien, donc inchangé
                 yield a.get_text(strip=True), t, fingerprint
             nxt = soup.select_one(".pagination a[rel=next], .pagination li.next a")
             url = clean_url(nxt["href"]) if nxt else None
 
-    def posts(self, topic_url):
-        """Parcourt toutes les pages d'un sujet et renvoie les messages."""
-        url = topic_url
+    def posts(self, topic_url, start=0):
+        """Parcourt les pages d'un sujet (à partir du message n° `start`) et renvoie les messages."""
+        url = topic_page(topic_url, start)
         while url:
             soup = self.get(url)
             if soup.select_one("form#login") and not soup.select("div.post"):
@@ -394,6 +420,37 @@ def write_html(results, path):
     open(path, "w", encoding="utf-8").write(render_html(results))
 
 
+def read_topic(hub, forum, name, title, turl, old_mark, done, openings, results):
+    """Lit les messages pas encore traités d'un sujet, ajoute leurs fréquences et renvoie leur nombre.
+
+    Si le sujet a déjà été lu, on va directement à la page de son dernier message connu
+    (les nouveaux messages sont forcément après) au lieu de tout relire depuis la page 1.
+    """
+    old = replies_in(old_mark)   # réponses lors de la dernière lecture : le dernier message lu porte ce n°
+    start = (old // POSTS_PER_PAGE) * POSTS_PER_PAGE if old is not None and turl in openings else 0
+    while True:
+        found, seen = 0, False
+        for i, post in enumerate(hub.posts(turl, start)):
+            seen = True
+            key = f"{turl}#{post['id']}"
+            if start and i == 0 and key not in done:
+                break  # la page ne commence pas par un message connu (décalage) : on relit tout
+            first = not start and i == 0
+            if first:
+                openings[turl] = re.sub(r"\s+", " ", post["texte"]).strip()[:300]
+            if key in done:
+                continue
+            rows = extract(forum, title, turl, post, name, "" if first else openings.get(turl, ""))
+            results.extend(rows)
+            found += len(rows)
+            done.add(key)
+        else:
+            if seen or not start:
+                return found
+            # page visée vide (messages supprimés entre-temps ?) : on relit tout le sujet
+        start = 0
+
+
 def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_topics=0,
          log=print, stats=None):
     """Parcourt les sections et enregistre les résultats (même en cas d'arrêt ou d'erreur).
@@ -409,7 +466,10 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
     if os.path.exists(state_path):
         state.update(json.load(open(state_path, encoding="utf-8")))
     done = set(state["posts"])
-    topic_marks = {} if full else state["topics"]
+    topic_marks = state["topics"]                  # empreintes enregistrées (toutes les sections)
+    known = {} if full else dict(topic_marks)      # empreintes utilisées pour sauter les sujets inchangés
+    complete = set(state.get("complete", []))      # sections déjà lues en entier une fois
+    openings = state.get("openings", {})           # sujet -> début de son premier message (la question)
 
     json_path = f"{out}.json"
     results = load_results(json_path)
@@ -434,28 +494,20 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
             name = SECTION_NAMES.get(forum) or names[forum]
             stats["forum"] = forum
             log(f"== Section {name}")
+            whole = True   # la section a-t-elle été lue sans rien sauter ?
             try:
-                for n, (title, turl, mark) in enumerate(hub.topics(forum), 1):
+                # section déjà lue en entier : on arrête la liste au premier sujet inchangé
+                listing = hub.topics(forum, known if forum in complete and not full else None)
+                for n, (title, turl, mark) in enumerate(listing, 1):
                     if max_topics and n > max_topics:
+                        whole = False
                         break
-                    if mark and topic_marks.get(turl) == mark:
+                    if mark and known.get(turl) == mark:
                         stats["skipped"] += 1  # aucun nouveau message depuis la dernière fois
                         continue
                     log(f"  [{n}] {title}")
                     try:
-                        found = 0
-                        opening = None   # premier message du sujet = la question d'origine
-                        for post in hub.posts(turl):
-                            first = opening is None
-                            if first:
-                                opening = re.sub(r"\s+", " ", post["texte"]).strip()
-                            key = f"{turl}#{post['id']}"
-                            if key in done:
-                                continue
-                            rows = extract(forum, title, turl, post, name, "" if first else opening)
-                            results.extend(rows)
-                            found += len(rows)
-                            done.add(key)
+                        found = read_topic(hub, forum, name, title, turl, known.get(turl), done, openings, results)
                         # mémorisé seulement si le sujet a été lu en entier
                         topic_marks[turl] = mark
                         stats["topics"] += 1
@@ -464,15 +516,19 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                         if found:
                             log(f"      +{found} fréquences")
                     except PermissionError as e:
+                        whole = False
                         log(f"      ! {e}")
                     except NetworkError as e:
                         # sujet sauté (pas marqué comme lu) : il sera repris au prochain scan
+                        whole = False
                         stats["errors"] += 1
                         failures += 1
                         log(f"      ! sujet sauté, {e}")
                         if failures >= 5:
                             raise StopScan("Le forum ne répond plus (5 erreurs d'affilée) : scan arrêté, "
                                            "réessaie plus tard")
+                # arrêt rapide autorisé aux prochains scans seulement si rien n'a été sauté
+                (complete.add if whole else complete.discard)(forum)
                 # sous-sections repérées sur la première page : on les parcourt juste après
                 # (même si la section n'a aucun sujet à elle)
                 subs = hub.subforums.get(forum, [])
@@ -482,8 +538,10 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                     log(f"  sous-sections : {', '.join(sub_name for _, sub_name in subs)}")
                     queue[0:0] = [s for s, _ in subs if s not in visited]
             except PermissionError as e:
+                complete.discard(forum)
                 log(f"  ! {e}")
             except NetworkError as e:
+                complete.discard(forum)
                 stats["errors"] += 1
                 failures += 1
                 log(f"  ! section sautée, {e}")
@@ -495,7 +553,8 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
         log(("! " if not str(e).startswith(("Limite", "Scan arrêté")) else "") + str(e))
     finally:
         json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        json.dump({"posts": sorted(done), "topics": topic_marks, "subforums": tree},
+        json.dump({"posts": sorted(done), "topics": topic_marks, "subforums": tree,
+                   "complete": sorted(complete), "openings": openings},
                   open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
         fields = ["section", "section_nom", "sujet", "frequence_mhz", "texte_trouve", "contexte",
                   "titre_bloc", "citation", "question", "auteur", "date", "lien"]
