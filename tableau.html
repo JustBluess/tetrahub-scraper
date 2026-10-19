@@ -38,6 +38,11 @@
   th .arrow { color: var(--accent); }
   td.f { font-family: var(--mono); white-space: nowrap; font-weight: 600; }
   td.ctx { min-width: 280px; }
+  td.ctx .extra { display: block; margin-top: 3px; font-size: 12.5px; color: var(--muted); }
+  td.ctx .extra b { font-weight: 600; }
+  td.ctx .tag { display: inline-block; margin-left: 8px; padding: 0 7px; border-radius: 999px; font-size: 11.5px;
+                background: #fdf1dc; color: #b45309; vertical-align: 1px; }
+  @media (prefers-color-scheme: dark) { td.ctx .tag { background: #3a2c0f; color: #fbbf24; } }
   td.meta { color: var(--muted); white-space: nowrap; font-size: 13px; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
@@ -62,6 +67,7 @@
     <input id="fmax" type="number" step="any" placeholder="max MHz">
   </span>
   <label class="chk"><input id="dedup" type="checkbox" checked> masquer les doublons</label>
+  <label class="chk"><input id="unknown" type="checkbox"> seulement les fréquences à identifier</label>
 </div>
 <div class="chips" id="chips"></div>
 <div class="count" id="count"></div>
@@ -116,7 +122,24 @@ for (const [name, lo, hi] of BANDS) {
   };
   $("chips").append(b);
 }
-DATA.forEach(r => r._s = norm([r.contexte, r.sujet, r.auteur, sectionName(r.section)].join(" ")));
+DATA.forEach(r => r._s = norm([r.contexte, r.titre_bloc, r.citation, r.sujet, r.auteur, sectionName(r.section)].join(" ")));
+
+// --- Fréquences sans explication -------------------------------------------------------------
+// Une ligne "a de l'info" si sa phrase, le titre de son bloc ou la citation contiennent au moins
+// 2 vrais mots (pas juste "MHz", "NFM", des chiffres...).
+const NOISE = new Set(["mhz", "khz", "ghz", "nfm", "fm", "am", "et", "ou", "de", "du", "la", "le", "les", "sur", "en",
+  "un", "une", "est", "freq", "frequence", "frequences", "canal", "ch", "the", "and",
+  "sous", "reserve", "active", "actives", "voici", "aussi", "plus", "ici", "pas", "inconnu", "inconnue"]);
+const infoWords = t => (norm(t).replace(/\d+[.,]?\d*/g, " ").match(/[a-z]{2,}/g) || []).filter(w => !NOISE.has(w));
+const own = r => [r.contexte, r.titre_bloc, r.citation].filter(Boolean).join(" ");
+DATA.forEach(r => r._info = infoWords(own(r)).length >= 2);
+// "vu ailleurs" : la même fréquence expliquée dans un autre message
+const ELSEWHERE = {};
+for (const r of DATA) if (r._info) (ELSEWHERE[r.frequence_mhz] ||= []).push(r);
+DATA.forEach(r => {
+  r._else = r._info ? [] : (ELSEWHERE[r.frequence_mhz] || []).filter(o => o.lien !== r.lien).slice(0, 2);
+  r._unknown = !r._info && !r._else.length;
+});
 
 function filtered() {
   const words = norm($("q").value).split(/\s+/).filter(Boolean);
@@ -124,6 +147,7 @@ function filtered() {
   const seen = new Set();
   const out = DATA.filter(r => {
     if (sec && r.section !== sec) return false;
+    if ($("unknown").checked && !r._unknown) return false;
     if (!isNaN(lo) && r.frequence_mhz < lo) return false;
     if (!isNaN(hi) && r.frequence_mhz > hi) return false;
     if (!words.every(w => r._s.includes(w) || String(r.frequence_mhz).startsWith(w.replace(",", ".")))) return false;
@@ -159,12 +183,32 @@ function highlight(el, text, words) {
 function render() {
   const { out, words } = filtered();
   const distinct = new Set(out.map(r => r.frequence_mhz)).size;
-  $("count").textContent = `${out.length} résultat${out.length > 1 ? "s" : ""} · ${distinct} fréquence${distinct > 1 ? "s" : ""} différente${distinct > 1 ? "s" : ""}`;
+  const unknown = out.filter(r => r._unknown).length;
+  $("count").textContent = `${out.length} résultat${out.length > 1 ? "s" : ""} · ${distinct} fréquence${distinct > 1 ? "s" : ""} différente${distinct > 1 ? "s" : ""}` +
+    ` · ${unknown} à identifier`;
   const tb = $("rows"); tb.replaceChildren();
   for (const r of out.slice(0, shown)) {
     const tr = document.createElement("tr");
     const f = document.createElement("td"); f.className = "f"; f.textContent = fmtF(r.frequence_mhz) + " MHz";
-    const c = document.createElement("td"); c.className = "ctx"; highlight(c, r.contexte, words);
+    const c = document.createElement("td"); c.className = "ctx";
+    const main = document.createElement("span"); highlight(main, r.contexte, words); c.append(main);
+    if (r._unknown) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "à identifier"; c.append(t); }
+    // infos complémentaires : titre du bloc, citation, et pour les lignes sans explication la question
+    // du sujet et ce qu'en disent d'autres messages
+    const extra = (label, text, link) => {
+      const e = document.createElement("span"); e.className = "extra";
+      const b = document.createElement("b"); b.textContent = label + " : "; e.append(b);
+      const body = link ? document.createElement("a") : document.createElement("span");
+      if (link) { body.href = link; body.target = "_blank"; body.rel = "noopener"; }
+      highlight(body, text.length > 160 ? text.slice(0, 160) + "…" : text, words);
+      e.append(body); c.append(e);
+    };
+    if (r.titre_bloc) extra("Titre", r.titre_bloc);
+    if (r.citation) extra("En réponse à", r.citation);
+    if (!r._info) {
+      for (const o of r._else) extra("Vu ailleurs", o.titre_bloc ? `${o.titre_bloc} — ${o.contexte}` : o.contexte, o.lien);
+      if (r.question) extra("Question du sujet", r.question);
+    }
     const s = document.createElement("td"); const a = document.createElement("a");
     a.href = r.lien; a.target = "_blank"; a.rel = "noopener"; highlight(a, r.sujet, words); s.append(a);
     const sec = document.createElement("td"); sec.className = "meta"; sec.textContent = sectionName(r.section);
@@ -180,7 +224,7 @@ function render() {
 document.querySelectorAll("th").forEach(th => th.onclick = () => {
   sortDir = th.dataset.k === sortKey ? -sortDir : 1; sortKey = th.dataset.k; render();
 });
-for (const id of ["q", "section", "fmin", "fmax", "dedup"]) $(id).addEventListener("input", () => {
+for (const id of ["q", "section", "fmin", "fmax", "dedup", "unknown"]) $(id).addEventListener("input", () => {
   if (id === "fmin" || id === "fmax") { band = null; document.querySelectorAll(".chip").forEach(c => c.classList.remove("on")); }
   shown = PAGE; render();
 });

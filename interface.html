@@ -70,6 +70,7 @@
   .sec .rec { color: var(--accent); font-size: 11.5px; margin-left: 6px; }
   .sec .twisty { display: inline-block; width: 18px; margin-right: 2px; text-align: center; color: var(--muted);
                  border-radius: 4px; transition: transform .15s; font-weight: 600; }
+  .sec .twisty-space { display: inline-block; width: 18px; margin-right: 2px; }
   .sec .twisty:hover { background: var(--border); color: var(--text); }
   .sec .twisty.open { transform: rotate(90deg); }
   .sec .kids { color: var(--muted); font-size: 11.5px; margin-left: 8px; }
@@ -269,6 +270,9 @@ function buildSections() {
         tw.title = "Afficher / masquer les sous-sections";
         tw.onclick = e => { e.preventDefault(); e.stopPropagation(); toggleSub(f.slug); };
         name.append(tw);
+      } else {
+        // même largeur que la flèche, pour que tous les noms soient alignés
+        const sp = document.createElement("span"); sp.className = "twisty-space"; name.append(sp);
       }
       name.append(f.name);
       if (rec.has(f.slug)) { const r = document.createElement("span"); r.className = "rec"; r.textContent = "conseillée"; name.append(r); }

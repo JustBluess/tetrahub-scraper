@@ -41,9 +41,11 @@ DEFAULT_FORUMS = [
     "freq-frequences-etrangeres",
 ]
 
-# Nombre décimal éventuellement suivi d'une unité (MHz, kHz, GHz)
+# Nombre décimal éventuellement suivi d'une unité (MHz, kHz, GHz).
+# Accepte aussi l'écriture "428.187.50" (= 428,18750 MHz) ; "(?!\.\d)" écarte les adresses IP.
 FREQ_RE = re.compile(
-    r"(?<![\d.,])(\d{1,5}(?:[.,]\d{1,6})?)\s*(GHz|MHz|kHz|Mhz|mhz|khz|ghz|MHZ|KHZ|GHZ)?(?![\d])"
+    r"(?<![\d.,])(\d{2,4}\.\d{3}\.\d{1,3}|\d{1,5}(?:[.,]\d{1,6})?)(?![.,]\d)"
+    r"\s*(GHz|MHz|kHz|Mhz|mhz|khz|ghz|MHZ|KHZ|GHZ)?(?![\d])"
 )
 
 
@@ -59,6 +61,9 @@ def parse_frequencies(text):
     found = []
     for m in FREQ_RE.finditer(text):
         raw, unit = m.group(1), (m.group(2) or "").lower()
+        if raw.count(".") == 2:          # "428.187.50" -> "428.18750"
+            head, mid, tail = raw.split(".")
+            raw = f"{head}.{mid}{tail}"
         value = float(raw.replace(",", "."))
         decimals = len(re.split(r"[.,]", raw)[1]) if re.search(r"[.,]", raw) else 0
         if unit == "ghz":
@@ -222,6 +227,21 @@ class TetraHub:
                     continue
                 for br in content.find_all("br"):
                     br.replace_with("\n")
+                # Citations : gardées à part ("en réponse à") et retirées du texte, sinon les fréquences
+                # citées seraient comptées une 2e fois et attribuées à celui qui répond.
+                quotes = []
+                for bq in content.find_all("blockquote"):
+                    if bq.find_parent("blockquote"):
+                        continue  # citation dans une citation : déjà comprise dans la citation externe
+                    cite = bq.find("cite")
+                    who = cite.get_text(" ", strip=True).split(" a écrit")[0] if cite else ""
+                    if cite:
+                        cite.decompose()
+                    text = re.sub(r"\s+", " ", bq.get_text(" ", strip=True))
+                    if text:
+                        quotes.append(f"{who} : {text}" if who else text)
+                for bq in content.find_all("blockquote"):
+                    bq.decompose()
                 author = p.select_one(".author .username, .author .username-coloured")
                 date = p.select_one(".author time")
                 yield {
@@ -229,6 +249,7 @@ class TetraHub:
                     "auteur": author.get_text(strip=True) if author else "",
                     "date": date.get("datetime", date.get_text(strip=True)) if date else "",
                     "texte": content.get_text("\n"),
+                    "citations": quotes,
                     "tableaux": [
                         [[c.get_text(" ", strip=True) for c in tr.select("td, th")] for tr in tbl.select("tr")]
                         for tbl in content.select("table")
@@ -238,15 +259,24 @@ class TetraHub:
             url = clean_url(nxt["href"]) if nxt else None
 
 
-def extract(forum, topic_title, topic_url, post, section_name=""):
-    """Transforme un message en lignes 'une fréquence par ligne' avec son contexte."""
+def extract(forum, topic_title, topic_url, post, section_name="", question=""):
+    """Transforme un message en lignes 'une fréquence par ligne' avec son contexte.
+
+    `question` : début du premier message du sujet, quand `post` est une réponse.
+    """
     rows = []
     lines = [l.strip() for l in post["texte"].splitlines() if l.strip()]
     # Les lignes de tableaux sont souvent les plus riches (fréquence ; service ; ville...)
     lines += [" | ".join(r) for t in post["tableaux"] for r in t]
+    citation = " / ".join(post.get("citations", []))[:300]
     seen = set()
+    heading = ""   # dernière ligne sans fréquence rencontrée : souvent le titre d'une liste ("Pompiers :")
     for line in lines:
-        for mhz, raw in parse_frequencies(line):
+        found = parse_frequencies(line)
+        if not found:
+            heading = line[:120] if len(line) <= 120 else ""
+            continue
+        for mhz, raw in found:
             if (mhz, line) in seen:
                 continue
             seen.add((mhz, line))
@@ -257,6 +287,9 @@ def extract(forum, topic_title, topic_url, post, section_name=""):
                 "frequence_mhz": mhz,
                 "texte_trouve": raw,
                 "contexte": line[:300],
+                "titre_bloc": heading,
+                "citation": citation,
+                "question": question[:300],
                 "auteur": post["auteur"],
                 "date": post["date"],
                 "lien": f"{topic_url}#{post['id']}" if post["id"] else topic_url,
@@ -352,11 +385,15 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                     log(f"  [{n}] {title}")
                     try:
                         found = 0
+                        opening = None   # premier message du sujet = la question d'origine
                         for post in hub.posts(turl):
+                            first = opening is None
+                            if first:
+                                opening = re.sub(r"\s+", " ", post["texte"]).strip()
                             key = f"{turl}#{post['id']}"
                             if key in done:
                                 continue
-                            rows = extract(forum, title, turl, post, name)
+                            rows = extract(forum, title, turl, post, name, "" if first else opening)
                             results.extend(rows)
                             found += len(rows)
                             done.add(key)
@@ -384,7 +421,8 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
         json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         json.dump({"posts": sorted(done), "topics": topic_marks, "subforums": tree},
                   open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
-        fields = ["section", "section_nom", "sujet", "frequence_mhz", "texte_trouve", "contexte", "auteur", "date", "lien"]
+        fields = ["section", "section_nom", "sujet", "frequence_mhz", "texte_trouve", "contexte",
+                  "titre_bloc", "citation", "question", "auteur", "date", "lien"]
         # utf-8-sig + ";" pour que le fichier s'ouvre directement dans Excel (version FR)
         with open(f"{out}.csv", "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
