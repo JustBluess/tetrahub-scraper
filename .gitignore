@@ -6,6 +6,7 @@ etat.json
 frequences.csv
 frequences.json
 frequences.html
+*.tmp
 
 __pycache__/
 *.pyc

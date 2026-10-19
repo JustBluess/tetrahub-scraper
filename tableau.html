@@ -122,7 +122,10 @@ for (const [name, lo, hi] of BANDS) {
   };
   $("chips").append(b);
 }
-DATA.forEach(r => r._s = norm([r.contexte, r.titre_bloc, r.citation, r.sujet, r.auteur, sectionName(r.section)].join(" ")));
+DATA.forEach(r => {
+  r._s = norm([r.contexte, r.titre_bloc, r.citation, r.sujet, r.auteur, sectionName(r.section)].join(" "));
+  r._f = fmtF(r.frequence_mhz);
+});
 
 // --- Fréquences sans explication -------------------------------------------------------------
 // Une ligne "a de l'info" si sa phrase, le titre de son bloc ou la citation contiennent au moins
@@ -150,7 +153,9 @@ function filtered() {
     if ($("unknown").checked && !r._unknown) return false;
     if (!isNaN(lo) && r.frequence_mhz < lo) return false;
     if (!isNaN(hi) && r.frequence_mhz > hi) return false;
-    if (!words.every(w => r._s.includes(w) || String(r.frequence_mhz).startsWith(w.replace(",", ".")))) return false;
+    // une fréquence se cherche aussi sous sa forme affichée ("145.500"), quelle que soit l'écriture du message
+    if (!words.every(w => r._s.includes(w) || r._f.startsWith(w.replace(",", ".")) ||
+                          String(r.frequence_mhz).startsWith(w.replace(",", ".")))) return false;
     if ($("dedup").checked) {
       const k = r.frequence_mhz + "|" + norm(r.contexte);
       if (seen.has(k)) return false;
@@ -159,7 +164,9 @@ function filtered() {
     return true;
   });
   out.sort((a, b) => {
-    const x = a[sortKey], y = b[sortKey];
+    // la colonne Section affiche un nom : on trie sur ce nom, pas sur l'identifiant interne
+    const key = r => sortKey === "section" ? sectionName(r.section) : r[sortKey];
+    const x = key(a), y = key(b);
     return (typeof x === "number" ? x - y : String(x).localeCompare(String(y), "fr")) * sortDir;
   });
   return { out, words };

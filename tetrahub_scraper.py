@@ -19,6 +19,7 @@ ne récupère que les nouveautés.
 import argparse
 import csv
 import getpass
+import io
 import json
 import os
 import re
@@ -30,6 +31,20 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE = "https://forum.tetrahub.net/"
+COOKIE_DOMAIN = ".forum.tetrahub.net"   # domaine des cookies de connexion envoyés par le forum
+
+
+def save_json(path, obj, **kw):
+    """Écrit un fichier JSON d'un coup (fichier temporaire puis renommage) : une coupure pendant
+    l'écriture ne peut pas laisser un fichier à moitié écrit, donc illisible."""
+    write_atomic(path, json.dumps(obj, ensure_ascii=False, **kw))
+
+
+def write_atomic(path, text, encoding="utf-8", newline=None):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding=encoding, newline=newline) as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 # Sous-forums de la catégorie "Spectre radio"
 DEFAULT_FORUMS = [
@@ -42,9 +57,11 @@ DEFAULT_FORUMS = [
 ]
 
 # Nombre décimal éventuellement suivi d'une unité (MHz, kHz, GHz).
-# Accepte aussi l'écriture "428.187.50" (= 428,18750 MHz) ; "(?!\.\d)" écarte les adresses IP.
+# Accepte aussi l'écriture "428.187.50" (= 428,18750 MHz). Écarte les adresses IP ("192.168.1.1" :
+# suivi de ".chiffre") et les grands nombres à milliers ("93,610,869" : suivi de ",ddd," ou ",ddd" final),
+# mais garde les listes collées comme "145.500,145.600".
 FREQ_RE = re.compile(
-    r"(?<![\d.,])(\d{2,4}\.\d{3}\.\d{1,3}|\d{1,5}(?:[.,]\d{1,6})?)(?![.,]\d)"
+    r"(?<![\d.,])(\d{2,4}\.\d{3}\.\d{1,3}|\d{1,5}(?:[.,]\d{1,6})?)(?!\.\d)(?!,\d{3}(?:[,\s]|$))"
     r"\s*(GHz|MHz|kHz|Mhz|mhz|khz|ghz|MHZ|KHZ|GHZ)?(?![\d])"
 )
 
@@ -58,6 +75,8 @@ def clean_url(url):
 
 def parse_frequencies(text):
     """Renvoie la liste des fréquences (en MHz) trouvées dans un texte."""
+    # "145.500,145.600" : deux fréquences collées par une virgule -> on les sépare d'un espace
+    text = re.sub(r"(\d\.\d{3,6}),(?=\d{2,4}\.\d)", r"\1, ", text)
     found = []
     for m in FREQ_RE.finditer(text):
         raw, unit = m.group(1), (m.group(2) or "").lower()
@@ -97,6 +116,7 @@ class NetworkError(Exception):
 
 
 POSTS_PER_PAGE = 35         # messages par page de sujet sur TetraHub (réglage du forum)
+SAVE_EVERY = 10             # enregistre la progression tous les N sujets lus (~1 fois par minute)
 
 
 def topic_page(topic_url, start):
@@ -195,7 +215,9 @@ class TetraHub:
         return soup
 
     def login(self, username, password):
-        soup = self.get("ucp.php?mode=login")
+        # téléchargement direct (pas self.get) : la connexion ne doit pas être bloquée par
+        # la limite de pages ou le bouton Arrêter du scan précédent
+        soup = BeautifulSoup(self.s.get(urljoin(BASE, "ucp.php?mode=login"), timeout=30).text, "html.parser")
         form = soup.select_one("form#login")
         if form is None:
             raise RuntimeError("Formulaire de connexion introuvable")
@@ -223,11 +245,22 @@ class TetraHub:
         return name.get_text(strip=True) if name else "?"
 
     def save_cookies(self, path):
-        json.dump(requests.utils.dict_from_cookiejar(self.s.cookies), open(path, "w", encoding="utf-8"))
+        """Enregistre les cookies AVEC leur domaine : sans lui, ceux relus au prochain lancement
+        cohabiteraient avec ceux que le forum renvoie, et l'ancienne session serait envoyée en premier."""
+        cookies = [{"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
+                   for c in self.s.cookies]
+        save_json(path, cookies)
 
     def load_cookies(self, path):
-        if os.path.exists(path):
-            self.s.cookies.update(json.load(open(path, encoding="utf-8")))
+        if not os.path.exists(path):
+            return
+        data = json.load(open(path, encoding="utf-8"))
+        if isinstance(data, dict):
+            # ancien format {nom: valeur}, sans domaine : on remet celui du forum
+            data = [{"name": k, "value": v, "domain": COOKIE_DOMAIN, "path": "/"} for k, v in data.items()]
+        for c in data:
+            self.s.cookies.set(c["name"], c["value"], domain=c.get("domain") or COOKIE_DOMAIN,
+                               path=c.get("path") or "/")
 
     def list_forums(self):
         """Sections du forum : [{slug, name, category, topics, sub}] (topics = None pour une sous-section)."""
@@ -272,7 +305,10 @@ class TetraHub:
                     for a in soup.select(".forabg a.forumtitle")
                 ]
                 first = False
-            if "pas les permissions" in soup.get_text():
+            # le refus du forum s'affiche dans un encadré (.panel) : chercher le texte partout ferait
+            # prendre un sujet intitulé "… pas les permissions …" pour un refus de toute la section
+            denied = any("pas les permissions" in p.get_text() for p in soup.select(".panel"))
+            if denied and not soup.select("li.row a.topictitle"):
                 raise PermissionError(f"Accès refusé à la section {forum_slug}")
             for row in soup.select("li.row"):
                 a = row.select_one("a.topictitle")
@@ -325,6 +361,13 @@ class TetraHub:
                         quotes.append(f"{who} : {text}" if who else text)
                 for bq in content.find_all("blockquote"):
                     bq.decompose()
+                # Tableaux : lus ligne par ligne ("col1 | col2 | col3"), puis retirés du texte, sinon
+                # chaque fréquence de tableau ressortirait une 2e fois avec juste sa cellule comme contexte.
+                tables = [[[c.get_text(" ", strip=True) for c in tr.select("td, th")] for tr in tbl.select("tr")]
+                          for tbl in content.select("table")]
+                for tbl in content.select("table"):
+                    if not tbl.find_parent("table"):   # un tableau imbriqué part avec son tableau parent
+                        tbl.decompose()
                 author = p.select_one(".author .username, .author .username-coloured")
                 date = p.select_one(".author time")
                 yield {
@@ -333,10 +376,7 @@ class TetraHub:
                     "date": date.get("datetime", date.get_text(strip=True)) if date else "",
                     "texte": content.get_text("\n"),
                     "citations": quotes,
-                    "tableaux": [
-                        [[c.get_text(" ", strip=True) for c in tr.select("td, th")] for tr in tbl.select("tr")]
-                        for tbl in content.select("table")
-                    ],
+                    "tableaux": tables,
                 }
             nxt = soup.select_one(".pagination a[rel=next], .pagination li.next a")
             url = clean_url(nxt["href"]) if nxt else None
@@ -349,12 +389,17 @@ def extract(forum, topic_title, topic_url, post, section_name="", question=""):
     """
     rows = []
     lines = [l.strip() for l in post["texte"].splitlines() if l.strip()]
-    # Les lignes de tableaux sont souvent les plus riches (fréquence ; service ; ville...)
-    lines += [" | ".join(r) for t in post["tableaux"] for r in t]
+    # Les lignes de tableaux sont souvent les plus riches (fréquence ; service ; ville...).
+    # None marque le début de chaque tableau : son titre repart de zéro (puis de sa ligne d'en-tête).
+    for table in post["tableaux"]:
+        lines += [None] + [" | ".join(r) for r in table]
     citation = " / ".join(post.get("citations", []))[:300]
     seen = set()
     heading = ""   # dernière ligne sans fréquence rencontrée : souvent le titre d'une liste ("Pompiers :")
     for line in lines:
+        if line is None:
+            heading = ""
+            continue
         found = parse_frequencies(line)
         if not found:
             heading = line[:120] if len(line) <= 120 else ""
@@ -417,7 +462,7 @@ def render_html(results, section_names=None):
 
 
 def write_html(results, path):
-    open(path, "w", encoding="utf-8").write(render_html(results))
+    write_atomic(path, render_html(results))
 
 
 def read_topic(hub, forum, name, title, turl, old_mark, done, openings, results):
@@ -478,6 +523,25 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
     for subs in tree.values():
         names.update(dict(map(tuple, subs)))
 
+    def checkpoint():
+        """Enregistre la progression. Appelé régulièrement : si le programme est tué en route
+        (fenêtre fermée, coupure...), seul le travail depuis le dernier point est perdu.
+        Les résultats d'abord : une coupure entre les deux écritures donnerait au pire quelques
+        doublons, jamais des fréquences perdues."""
+        save_json(json_path, results, indent=1)
+        save_json(state_path, {"posts": sorted(done), "topics": topic_marks, "subforums": tree,
+                               "complete": sorted(complete), "openings": openings})
+
+    def queue_subforums(forum):
+        """Sous-sections repérées sur la première page : on les parcourt juste après
+        (même si la section n'a aucun sujet à elle, ou si on n'a pas le droit de lire les siens)."""
+        subs = hub.subforums.get(forum, [])
+        if subs:
+            tree[forum] = [list(s) for s in subs]
+            names.update(dict(subs))
+            log(f"  sous-sections : {', '.join(sub_name for _, sub_name in subs)}")
+            queue[0:0] = [s for s, _ in subs if s not in visited]
+
     queue, visited = list(forums), set()
     try:
         while queue:
@@ -515,6 +579,8 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                         failures = 0
                         if found:
                             log(f"      +{found} fréquences")
+                        if stats["topics"] % SAVE_EVERY == 0:
+                            checkpoint()
                     except PermissionError as e:
                         whole = False
                         log(f"      ! {e}")
@@ -529,17 +595,11 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                                            "réessaie plus tard")
                 # arrêt rapide autorisé aux prochains scans seulement si rien n'a été sauté
                 (complete.add if whole else complete.discard)(forum)
-                # sous-sections repérées sur la première page : on les parcourt juste après
-                # (même si la section n'a aucun sujet à elle)
-                subs = hub.subforums.get(forum, [])
-                if subs:
-                    tree[forum] = [list(s) for s in subs]
-                    names.update(dict(subs))
-                    log(f"  sous-sections : {', '.join(sub_name for _, sub_name in subs)}")
-                    queue[0:0] = [s for s, _ in subs if s not in visited]
+                queue_subforums(forum)
             except PermissionError as e:
                 complete.discard(forum)
                 log(f"  ! {e}")
+                queue_subforums(forum)   # ses sous-sections peuvent, elles, être autorisées
             except NetworkError as e:
                 complete.discard(forum)
                 stats["errors"] += 1
@@ -552,18 +612,25 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
         stats["session_expired"] = isinstance(e, SessionExpired)
         log(("! " if not str(e).startswith(("Limite", "Scan arrêté")) else "") + str(e))
     finally:
-        json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        json.dump({"posts": sorted(done), "topics": topic_marks, "subforums": tree,
-                   "complete": sorted(complete), "openings": openings},
-                  open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
+        checkpoint()
         fields = ["section", "section_nom", "sujet", "frequence_mhz", "texte_trouve", "contexte",
                   "titre_bloc", "citation", "question", "auteur", "date", "lien"]
-        # utf-8-sig + ";" pour que le fichier s'ouvre directement dans Excel (version FR)
-        with open(f"{out}.csv", "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
-            w.writeheader()
-            w.writerows(results)
-        write_html(results, f"{out}.html")
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=fields, delimiter=";", lineterminator="\r\n")
+        w.writeheader()
+        w.writerows(results)
+        # Fichiers "de lecture" : s'ils sont ouverts (Excel, navigateur...), Windows les verrouille.
+        # On le signale sans faire échouer le scan : les données, elles, sont déjà enregistrées.
+        for label, write in (
+            # utf-8-sig + ";" pour que le fichier s'ouvre directement dans Excel (version FR)
+            ("csv", lambda: write_atomic(f"{out}.csv", buf.getvalue(), encoding="utf-8-sig", newline="")),
+            ("html", lambda: write_html(results, f"{out}.html")),
+        ):
+            try:
+                write()
+            except OSError:
+                log(f"! {os.path.basename(out)}.{label} non mis à jour : il est sans doute ouvert "
+                    f"(Excel ?). Ferme-le, il sera recréé au prochain scan.")
         stats["total"] = len(results)
         log(f"{stats['skipped']} sujets inchangés ignorés, {stats['topics']} sujets lus")
         name = os.path.basename(out)
@@ -602,6 +669,7 @@ def main():
     # n'est jamais enregistré, seulement le cookie "se souvenir de moi" du forum.
     hub.load_cookies(args.cookies)
     if hub.is_logged_in():
+        hub.save_cookies(args.cookies)   # le forum a pu renouveler la clé "se souvenir de moi"
         print("Connecté (session enregistrée).")
     else:
         user = os.environ.get("TETRAHUB_USER") or input("Nom d'utilisateur TetraHub : ")
@@ -616,6 +684,8 @@ def main():
              max_topics=args.max_topics)
     except KeyboardInterrupt:
         print("\nInterrompu : ce qui a été récupéré est enregistré.")
+    finally:
+        hub.save_cookies(args.cookies)
 
 
 if __name__ == "__main__":

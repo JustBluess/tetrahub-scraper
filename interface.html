@@ -344,7 +344,10 @@ function estimate() {
   const capped = maxPages && pages > maxPages;
   const p = capped ? maxPages : pages;
   const min = Math.round(p * (delay + 0.5) / 60);
-  const txt = selected().length === 0 ? "Aucune section cochée." :
+  // le forum ne donne pas le nombre de sujets des sous-sections : pas de faux "0 page" dans ce cas
+  const limit = maxPages ? ` Ce scan s'arrêtera au plus à ${maxPages} pages (≈ ${Math.round(maxPages * (delay + 0.5) / 60)} min).` : "";
+  const txt = chosen.length === 0 ? "Aucune section cochée." :
+    pages === 0 && unknown ? `Durée inconnue : le forum n'indique pas le nombre de sujets de ces sous-sections.${limit}` :
     `Environ ${pages} pages à lire${unknown ? " (+ sous-sections)" : ""}` +
     (capped ? ` : ce scan s'arrêtera à ${maxPages} pages (≈ ${min || "< 1"} min), la suite au prochain.`
             : ` ≈ ${min || "< 1"} min.`) +

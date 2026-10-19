@@ -10,6 +10,7 @@ Le serveur n'écoute que sur ta machine : personne d'autre ne peut y accéder.
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -81,6 +82,8 @@ class App:
         self.started = None
         self.finished = None
         self.update = None
+        self.last_refresh = 0
+        self.refreshing = False
 
     def watch_updates(self):
         """Tourne en arrière-plan : vérifie GitHub au démarrage puis toutes les 6 h."""
@@ -88,10 +91,28 @@ class App:
             self.update = check_updates()
             time.sleep(UPDATE_EVERY)
 
+    def retry_refresh(self):
+        """Démarré sans Internet : la liste des sections est vide. On réessaie en arrière-plan
+        (au plus toutes les 30 s) pour qu'elle apparaisse dès que la connexion revient."""
+        if self.forums or self.refreshing or self.running or time.time() - self.last_refresh < 30:
+            return
+        self.refreshing = True
+
+        def run():
+            try:
+                self.refresh()
+            finally:
+                self.refreshing = False
+
+        threading.Thread(target=run, daemon=True).start()
+
     def refresh(self):
         """Vérifie la connexion et récupère la liste des sections (au démarrage)."""
+        self.last_refresh = time.time()
         try:
             self.user = self.hub.whoami()
+            if self.user:
+                self.hub.save_cookies(COOKIES)   # le forum a pu renouveler la clé "se souvenir de moi"
         except Exception as e:
             self.log(f"! Impossible de joindre le forum : {e}")
         try:
@@ -113,7 +134,9 @@ class App:
             raise RuntimeError("Un scan est déjà en cours")
         if not self.user:
             raise RuntimeError("Connecte-toi d'abord")
+        # sections de l'accueil + sous-sections découvertes pendant les scans (ex. un département)
         known = {f["slug"] for f in self.forums}
+        known |= {slug for subs in self.read_state()[1].values() for slug, _ in subs}
         forums = [f for f in forums if f in known]
         if not forums:
             raise RuntimeError("Choisis au moins une section")
@@ -136,12 +159,15 @@ class App:
                 self.log(f"! Erreur : {e}")
                 traceback.print_exc()
             finally:
+                if self.user:
+                    self.hub.save_cookies(COOKIES)  # garde la session à jour pour le prochain lancement
                 self.finished = time.time()
 
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
 
     def status(self):
+        self.retry_refresh()
         with self.lock:
             log = list(self.log_lines)
         return {
@@ -191,6 +217,17 @@ class App:
 
 
 app = App()
+
+
+class Server(ThreadingHTTPServer):
+    # Sous Windows, l'option par défaut laisserait un 2e web.py démarrer sur le même port :
+    # deux serveurs tourneraient en même temps sans qu'on sache lequel répond.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):   # Windows : port réservé à ce seul programme
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -282,12 +319,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    url = f"http://{HOST}:{PORT}"
+    try:
+        server = Server((HOST, PORT), Handler)   # réservé d'abord : inutile d'aller sur le forum si déjà lancé
+    except OSError:
+        print(f"L'interface tourne déjà (port {PORT} occupé) : ouvre {url}\n"
+              "ou ferme l'autre fenêtre où web.py tourne (Ctrl+C) avant de relancer.")
+        sys.exit(1)
     threading.Thread(target=app.watch_updates, daemon=True).start()
     print("Vérification de la connexion au forum...")
     app.refresh()
     print(f"Connecté en tant que {app.user}" if app.user else "Pas connecté : connecte-toi depuis la page.")
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    url = f"http://{HOST}:{PORT}"
     print(f"Interface prête sur {url}  (Ctrl+C pour quitter)")
     if "--no-browser" not in sys.argv:
         webbrowser.open(url)
