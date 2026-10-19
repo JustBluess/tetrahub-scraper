@@ -85,7 +85,20 @@ def parse_frequencies(text):
 
 
 class StopScan(Exception):
-    """Arrêt demandé (bouton Arrêter, ou limite de pages atteinte)."""
+    """Arrêt du scan (bouton Arrêter, limite de pages, connexion perdue, forum qui bloque...)."""
+
+
+class SessionExpired(StopScan):
+    """La connexion au forum a expiré pendant le scan : inutile de continuer."""
+
+
+class NetworkError(Exception):
+    """Page impossible à récupérer malgré plusieurs essais."""
+
+
+RETRY_WAITS = (5, 15, 45)   # secondes d'attente avant chaque nouvel essai après une erreur réseau
+MAX_DELAY = 60              # pause maximale entre deux pages quand le forum demande de ralentir
+MIN_RETRY_AFTER = 30        # attente minimale (s) quand le forum répond "trop de requêtes"
 
 
 class TetraHub:
@@ -100,18 +113,60 @@ class TetraHub:
         self.max_pages = 0      # 0 = pas de limite
         self.should_stop = lambda: False
         self.subforums = {}     # section -> [(slug, nom)] des sous-sections vues pendant le scan
+        self.log = print        # le scan le remplace pour afficher les ralentissements dans le journal
 
-    def get(self, url):
-        if self.max_pages and self.pages >= self.max_pages:
-            raise StopScan(f"Limite de {self.max_pages} pages atteinte, la suite au prochain scan")
-        # pause pour rester poli avec le serveur, découpée pour réagir vite au bouton Arrêter
-        end = time.monotonic() + self.delay
+    def wait(self, seconds):
+        """Pause découpée pour réagir vite au bouton Arrêter."""
+        end = time.monotonic() + seconds
         while time.monotonic() < end:
             if self.should_stop():
                 raise StopScan("Scan arrêté")
             time.sleep(min(0.2, max(0, end - time.monotonic())))
+
+    def fetch(self, url):
+        """Télécharge une page en encaissant les coupures passagères et les demandes de ralentir."""
+        retries = 0
+        while True:
+            try:
+                r = self.s.get(url, timeout=30)
+            except requests.RequestException as e:
+                problem = f"réseau ({type(e).__name__})"
+            else:
+                if r.status_code == 403 and r.headers.get("cf-mitigated") == "challenge":
+                    # Cloudflare exige une vérification "humaine" : on n'insiste pas
+                    raise StopScan("Cloudflare bloque les requêtes automatiques pour le moment : "
+                                   "réessaie plus tard (plusieurs heures), avec une pause plus longue")
+                if r.status_code == 429 or (r.status_code == 503 and "Retry-After" in r.headers):
+                    # le serveur demande de ralentir : on attend ce qu'il dit et on double la pause
+                    try:
+                        pause = int(r.headers.get("Retry-After", 60))
+                    except ValueError:
+                        pause = 60
+                    pause = min(max(pause, MIN_RETRY_AFTER), 600)
+                    self.delay = min(MAX_DELAY, max(self.delay * 2, 5))
+                    if retries >= len(RETRY_WAITS):
+                        raise StopScan("Le forum demande de ralentir à répétition : scan arrêté, "
+                                       "réessaie plus tard")
+                    retries += 1
+                    self.log(f"  ~ le forum demande de ralentir : pause de {pause} s, "
+                             f"puis {self.delay:g} s entre deux pages")
+                    self.wait(pause)
+                    continue
+                if r.status_code < 500:
+                    return r
+                problem = f"serveur (erreur {r.status_code})"
+            if retries >= len(RETRY_WAITS):
+                raise NetworkError(f"{url} : problème {problem} persistant")
+            self.log(f"  ~ problème {problem}, nouvel essai dans {RETRY_WAITS[retries]} s")
+            self.wait(RETRY_WAITS[retries])
+            retries += 1
+
+    def get(self, url):
+        if self.max_pages and self.pages >= self.max_pages:
+            raise StopScan(f"Limite de {self.max_pages} pages atteinte, la suite au prochain scan")
+        self.wait(self.delay)  # pause pour rester poli avec le serveur
         self.pages += 1
-        r = self.s.get(urljoin(BASE, url), timeout=30)
+        r = self.fetch(urljoin(BASE, url))
         soup = BeautifulSoup(r.text, "html.parser")
         if r.status_code == 403:
             # phpBB répond 403 quand le compte n'a pas le droit de lire : on récupère son message
@@ -220,7 +275,9 @@ class TetraHub:
         while url:
             soup = self.get(url)
             if soup.select_one("form#login") and not soup.select("div.post"):
-                raise PermissionError("Connexion requise pour lire les sujets")
+                # le forum affiche le formulaire de connexion au lieu du sujet : la session a expiré
+                raise SessionExpired("Connexion au forum perdue : reconnecte-toi puis relance le scan "
+                                     "(il reprendra là où il s'est arrêté)")
             for p in soup.select("div.post"):
                 content = p.select_one("div.content")
                 if content is None:
@@ -344,7 +401,9 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
     `stats` est mis à jour au fil de l'eau, ce qui permet à l'interface web d'afficher la progression.
     """
     stats = stats if stats is not None else {}
-    stats.update(new=0, skipped=0, topics=0, forum="", total=0)
+    stats.update(new=0, skipped=0, topics=0, forum="", total=0, errors=0, session_expired=False)
+    hub.log = log
+    failures = 0   # erreurs réseau d'affilée : au-delà de 5, le forum est sans doute en panne
 
     state = {"posts": [], "topics": {}}
     if os.path.exists(state_path):
@@ -401,10 +460,19 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                         topic_marks[turl] = mark
                         stats["topics"] += 1
                         stats["new"] += found
+                        failures = 0
                         if found:
                             log(f"      +{found} fréquences")
                     except PermissionError as e:
                         log(f"      ! {e}")
+                    except NetworkError as e:
+                        # sujet sauté (pas marqué comme lu) : il sera repris au prochain scan
+                        stats["errors"] += 1
+                        failures += 1
+                        log(f"      ! sujet sauté, {e}")
+                        if failures >= 5:
+                            raise StopScan("Le forum ne répond plus (5 erreurs d'affilée) : scan arrêté, "
+                                           "réessaie plus tard")
                 # sous-sections repérées sur la première page : on les parcourt juste après
                 # (même si la section n'a aucun sujet à elle)
                 subs = hub.subforums.get(forum, [])
@@ -415,8 +483,16 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                     queue[0:0] = [s for s, _ in subs if s not in visited]
             except PermissionError as e:
                 log(f"  ! {e}")
+            except NetworkError as e:
+                stats["errors"] += 1
+                failures += 1
+                log(f"  ! section sautée, {e}")
+                if failures >= 5:
+                    raise StopScan("Le forum ne répond plus (5 erreurs d'affilée) : scan arrêté, "
+                                   "réessaie plus tard")
     except StopScan as e:
-        log(str(e))
+        stats["session_expired"] = isinstance(e, SessionExpired)
+        log(("! " if not str(e).startswith(("Limite", "Scan arrêté")) else "") + str(e))
     finally:
         json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         json.dump({"posts": sorted(done), "topics": topic_marks, "subforums": tree},

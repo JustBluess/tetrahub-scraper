@@ -130,6 +130,8 @@ class App:
         def run():
             try:
                 ts.scan(self.hub, forums, out=OUT, state_path=STATE, full=full, log=self.log, stats=self.stats)
+                if self.stats.get("session_expired"):
+                    self.user = None   # la page réaffiche le formulaire de connexion
             except Exception as e:
                 self.log(f"! Erreur : {e}")
                 traceback.print_exc()
