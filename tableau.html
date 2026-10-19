@@ -97,7 +97,10 @@ const PAGE = 300;
 const $ = id => document.getElementById(id);
 let sortKey = "frequence_mhz", sortDir = 1, shown = PAGE, band = null;
 
-const sectionName = s => META.sections[s] || s;
+// nom enregistré avec chaque fréquence (sous-sections comprises), sinon la liste connue, sinon l'identifiant
+const NAMES = {};
+DATA.forEach(r => { if (r.section_nom) NAMES[r.section] = r.section_nom; });
+const sectionName = s => NAMES[s] || META.sections[s] || s;
 // 446 -> "446.000", 145.6125 -> "145.6125" (au moins 3 décimales, comme sur un scanner)
 const fmtF = f => f.toFixed(6).replace(/0{1,3}$/, "").replace(/(\.\d{3}\d*?)0+$/, "$1");
 const fmtD = d => d ? new Date(d).toLocaleDateString("fr-FR") : "";

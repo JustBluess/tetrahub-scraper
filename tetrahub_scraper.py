@@ -94,6 +94,7 @@ class TetraHub:
         self.pages = 0          # pages téléchargées depuis le début du scan
         self.max_pages = 0      # 0 = pas de limite
         self.should_stop = lambda: False
+        self.subforums = {}     # section -> [(slug, nom)] des sous-sections vues pendant le scan
 
     def get(self, url):
         if self.max_pages and self.pages >= self.max_pages:
@@ -167,7 +168,7 @@ class TetraHub:
                                "topics": int(digits) if digits else None, "sub": False})
                 for sub in row.select("a.subforum"):
                     forums.append({"slug": slug(sub), "name": sub.get_text(strip=True), "category": category,
-                                   "topics": None, "sub": True})
+                                   "topics": None, "sub": True, "parent": slug(a)})
         return forums
 
     def topics(self, forum_slug):
@@ -178,8 +179,16 @@ class TetraHub:
         """
         url = f"{forum_slug}/"
         seen = set()
+        first = True
         while url:
             soup = self.get(url)
+            if first:
+                # les sous-sections sont listées en haut de la première page (bloc .forabg)
+                self.subforums[forum_slug] = [
+                    (urlparse(clean_url(a["href"])).path.strip("/"), a.get_text(strip=True))
+                    for a in soup.select(".forabg a.forumtitle")
+                ]
+                first = False
             if "pas les permissions" in soup.get_text():
                 raise PermissionError(f"Accès refusé à la section {forum_slug}")
             for row in soup.select("li.row"):
@@ -229,7 +238,7 @@ class TetraHub:
             url = clean_url(nxt["href"]) if nxt else None
 
 
-def extract(forum, topic_title, topic_url, post):
+def extract(forum, topic_title, topic_url, post, section_name=""):
     """Transforme un message en lignes 'une fréquence par ligne' avec son contexte."""
     rows = []
     lines = [l.strip() for l in post["texte"].splitlines() if l.strip()]
@@ -243,6 +252,7 @@ def extract(forum, topic_title, topic_url, post):
             seen.add((mhz, line))
             rows.append({
                 "section": forum,
+                "section_nom": section_name or SECTION_NAMES.get(forum, forum),
                 "sujet": topic_title,
                 "frequence_mhz": mhz,
                 "texte_trouve": raw,
@@ -311,11 +321,27 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
 
     json_path = f"{out}.json"
     results = load_results(json_path)
+    tree = state.get("subforums", {})   # section -> [[slug, nom]] : mémorisé pour l'interface
+    names = {}                          # noms des sous-sections découvertes pendant ce scan
+    for subs in tree.values():
+        names.update(dict(map(tuple, subs)))
 
+    queue, visited = list(forums), set()
     try:
-        for forum in forums:
+        while queue:
+            forum = queue.pop(0)
+            if forum in visited:
+                continue
+            visited.add(forum)
+            if forum not in SECTION_NAMES and forum not in names:
+                try:  # noms affichés sur l'accueil du forum, lus une seule fois
+                    names.update({f["slug"]: f["name"] for f in hub.list_forums()})
+                except requests.RequestException:
+                    pass
+                names.setdefault(forum, forum)
+            name = SECTION_NAMES.get(forum) or names[forum]
             stats["forum"] = forum
-            log(f"== Section {SECTION_NAMES.get(forum, forum)}")
+            log(f"== Section {name}")
             try:
                 for n, (title, turl, mark) in enumerate(hub.topics(forum), 1):
                     if max_topics and n > max_topics:
@@ -330,7 +356,7 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                             key = f"{turl}#{post['id']}"
                             if key in done:
                                 continue
-                            rows = extract(forum, title, turl, post)
+                            rows = extract(forum, title, turl, post, name)
                             results.extend(rows)
                             found += len(rows)
                             done.add(key)
@@ -342,14 +368,23 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
                             log(f"      +{found} fréquences")
                     except PermissionError as e:
                         log(f"      ! {e}")
+                # sous-sections repérées sur la première page : on les parcourt juste après
+                # (même si la section n'a aucun sujet à elle)
+                subs = hub.subforums.get(forum, [])
+                if subs:
+                    tree[forum] = [list(s) for s in subs]
+                    names.update(dict(subs))
+                    log(f"  sous-sections : {', '.join(sub_name for _, sub_name in subs)}")
+                    queue[0:0] = [s for s, _ in subs if s not in visited]
             except PermissionError as e:
                 log(f"  ! {e}")
     except StopScan as e:
         log(str(e))
     finally:
         json.dump(results, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        json.dump({"posts": sorted(done), "topics": topic_marks}, open(state_path, "w", encoding="utf-8"))
-        fields = ["section", "sujet", "frequence_mhz", "texte_trouve", "contexte", "auteur", "date", "lien"]
+        json.dump({"posts": sorted(done), "topics": topic_marks, "subforums": tree},
+                  open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
+        fields = ["section", "section_nom", "sujet", "frequence_mhz", "texte_trouve", "contexte", "auteur", "date", "lien"]
         # utf-8-sig + ";" pour que le fichier s'ouvre directement dans Excel (version FR)
         with open(f"{out}.csv", "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=fields, delimiter=";")

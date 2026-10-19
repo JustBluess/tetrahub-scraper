@@ -64,6 +64,12 @@
   .sec.sub { padding-left: 22px; }
   .sec .meta { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
   .sec .rec { color: var(--accent); font-size: 11.5px; margin-left: 6px; }
+  .sec .twisty { display: inline-block; width: 18px; margin-right: 2px; text-align: center; color: var(--muted);
+                 border-radius: 4px; transition: transform .15s; font-weight: 600; }
+  .sec .twisty:hover { background: var(--border); color: var(--text); }
+  .sec .twisty.open { transform: rotate(90deg); }
+  .sec .kids { color: var(--muted); font-size: 11.5px; margin-left: 8px; }
+  .sec .kids.on { color: var(--accent); }
   .bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 3px; width: 70px; }
   .bar > i { display: block; height: 100%; background: var(--ok); }
   .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
@@ -101,6 +107,7 @@
       <button id="openAll">Tout déplier</button>
       <button id="closeAll">Tout replier</button>
     </div>
+    <div class="muted small" style="margin-bottom:6px">Cocher une section scanne aussi ses sous-sections.</div>
     <div id="sections" class="muted">Chargement des sections…</div>
   </section>
 
@@ -145,7 +152,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem("th_" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("th_" + k, JSON.stringify(v)); } catch {} },
 };
-let S = null, built = false, poll = null;
+let S = null, built = false, poll = null, FORUMS = [];
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : {
@@ -161,6 +168,13 @@ function saveSelection() { store.set("forums", selected()); updateBadges(); esti
 
 // "N cochées" dans l'en-tête de chaque catégorie, utile quand elle est repliée
 function updateBadges() {
+  // "14 sous-sections · 2 cochées" à côté d'une section qui en a
+  for (const k of document.querySelectorAll("#sections .kids")) {
+    const subs = FORUMS.filter(x => isDescendant(x.slug, k.dataset.slug, FORUMS));
+    const n = subs.filter(x => document.querySelector(`#sections input[value="${x.slug}"]`)?.checked).length;
+    k.textContent = `${subs.length} sous-section${subs.length > 1 ? "s" : ""}` + (n ? ` · ${n} cochée${n > 1 ? "s" : ""}` : "");
+    k.classList.toggle("on", n > 0);
+  }
   for (const cat of document.querySelectorAll("#sections .cat")) {
     const n = cat.querySelectorAll("input:checked").length;
     const b = cat.querySelector(".badge");
@@ -169,19 +183,51 @@ function updateBadges() {
   }
 }
 
+// Sections de l'accueil + sous-sections découvertes pendant les scans (certaines ne sont visibles
+// qu'une fois connecté, comme celles de Fréquences VHF/UHF). Chaque sous-section suit sa section.
+function forumList() {
+  const list = S.forums.map(f => ({ ...f }));
+  const bySlug = Object.fromEntries(list.map(f => [f.slug, f]));
+  for (const [parent, subs] of Object.entries(S.tree || {})) {
+    const p = bySlug[parent];
+    if (!p) continue;
+    for (const [slug, name] of subs) {
+      if (bySlug[slug]) { bySlug[slug].parent = parent; continue; }
+      // insérée après la section et ses sous-sections déjà listées
+      let at = list.indexOf(p) + 1;
+      while (at < list.length && list[at].sub && isDescendant(list[at].slug, parent, list)) at++;
+      const f = { slug, name, category: p.category, topics: null, sub: true, parent };
+      list.splice(at, 0, f); bySlug[slug] = f;
+    }
+  }
+  return list;
+}
+function isDescendant(slug, ancestor, list) {
+  for (let f = list.find(x => x.slug === slug); f && f.parent; f = list.find(x => x.slug === f.parent))
+    if (f.parent === ancestor) return true;
+  return false;
+}
+// sujets lus dans la section ET ses sous-sections (le total affiché par le forum les inclut aussi)
+function readCount(slug, list) {
+  return (S.progress[slug] || 0) + list.filter(f => f.parent === slug).reduce((n, f) => n + readCount(f.slug, list), 0);
+}
+
+let builtKey = "";
 function buildSections() {
+  FORUMS = forumList();
+  builtKey = FORUMS.map(f => f.slug).join(",");
   const box = $("sections"); box.replaceChildren(); box.classList.remove("muted");
   const chosen = new Set(store.get("forums", S.recommended));
   const rec = new Set(S.recommended);
   // les catégories qui contiennent des sections conseillées passent en premier
-  const cats = [...new Set(S.forums.map(f => f.category))]
-    .map((c, i) => [c, i - 1000 * S.forums.filter(f => f.category === c && rec.has(f.slug)).length])
+  const cats = [...new Set(FORUMS.map(f => f.category))]
+    .map((c, i) => [c, i - 1000 * FORUMS.filter(f => f.category === c && rec.has(f.slug)).length])
     .sort((a, b) => a[1] - b[1]).map(x => x[0]);
   const openState = store.get("open", {});
   for (const cat of cats) {
     // repliée par défaut si elle ne contient aucune section conseillée ; ensuite on retient le choix
     const wrap = document.createElement("details"); wrap.className = "cat";
-    wrap.open = cat in openState ? openState[cat] : S.forums.some(f => f.category === cat && rec.has(f.slug));
+    wrap.open = cat in openState ? openState[cat] : FORUMS.some(f => f.category === cat && rec.has(f.slug));
     wrap.ontoggle = () => { const o = store.get("open", {}); o[cat] = wrap.open; store.set("open", o); };
     const head = document.createElement("summary"); head.className = "cat-head";
     const chev = document.createElement("span"); chev.className = "chev"; chev.textContent = "›";
@@ -195,25 +241,63 @@ function buildSections() {
       boxes.forEach(i => i.checked = check); saveSelection();
     };
     head.append(chev, title, badge, all); wrap.append(head);
-    for (const f of S.forums.filter(f => f.category === cat)) {
+    for (const f of FORUMS.filter(f => f.category === cat)) {
       const l = document.createElement("label"); l.className = "sec" + (f.sub ? " sub" : "");
+      l.dataset.slug = f.slug;
+      if (f.parent) l.dataset.parent = f.parent;
+      l.style.paddingLeft = (2 + 22 * depth(f)) + "px";
       const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = f.slug; cb.checked = chosen.has(f.slug);
       cb.onchange = saveSelection;
-      const name = document.createElement("span"); name.textContent = f.name;
+      const name = document.createElement("span");
+      const kids = FORUMS.filter(x => x.parent === f.slug);
+      if (kids.length) {
+        // flèche pour dérouler les sous-sections (dans le <label> : on empêche le clic de cocher la case)
+        const tw = document.createElement("span"); tw.className = "twisty"; tw.textContent = "›";
+        tw.title = "Afficher / masquer les sous-sections";
+        tw.onclick = e => { e.preventDefault(); e.stopPropagation(); toggleSub(f.slug); };
+        name.append(tw);
+      }
+      name.append(f.name);
       if (rec.has(f.slug)) { const r = document.createElement("span"); r.className = "rec"; r.textContent = "conseillée"; name.append(r); }
+      if (kids.length) {
+        const k = document.createElement("span"); k.className = "kids"; k.dataset.slug = f.slug; name.append(k);
+      }
       const meta = document.createElement("span"); meta.className = "meta"; meta.dataset.slug = f.slug;
       l.append(cb, name, meta); wrap.append(l);
     }
     box.append(wrap);
   }
   built = true;
+  applyFold();
+  updateBadges();
+}
+
+function depth(f) {
+  let d = 0;
+  for (let p = f; p && p.parent; p = FORUMS.find(x => x.slug === p.parent)) d++;
+  return d;
+}
+
+// sous-sections repliées par défaut ; on retient ce qui a été déroulé
+function toggleSub(slug) {
+  const o = store.get("subopen", {}); o[slug] = !o[slug]; store.set("subopen", o); applyFold();
+}
+function applyFold() {
+  const open = store.get("subopen", {});
+  for (const row of document.querySelectorAll("#sections .sec")) {
+    let hidden = false;
+    for (let p = row.dataset.parent; p; p = FORUMS.find(x => x.slug === p)?.parent)
+      if (!open[p]) { hidden = true; break; }
+    row.hidden = hidden;
+    row.querySelector(".twisty")?.classList.toggle("open", !!open[row.dataset.slug]);
+  }
   updateBadges();
 }
 
 function updateProgress() {
   for (const m of document.querySelectorAll(".sec .meta")) {
-    const f = S.forums.find(x => x.slug === m.dataset.slug);
-    const read = S.progress[m.dataset.slug] || 0;
+    const f = FORUMS.find(x => x.slug === m.dataset.slug);
+    const read = readCount(m.dataset.slug, FORUMS);
     m.replaceChildren();
     if (f.topics) {
       m.append(`${Math.min(read, f.topics)} / ${f.topics} sujets`);
@@ -231,10 +315,13 @@ function estimate() {
   const delay = Math.max(1.5, parseFloat($("delay").value) || 5);
   const maxPages = parseInt($("maxPages").value) || 0;
   let pages = 0, unknown = false;
-  for (const slug of selected()) {
-    const f = S.forums.find(x => x.slug === slug);
+  const chosen = selected();
+  for (const slug of chosen) {
+    // une sous-section dont la section est cochée est déjà comptée avec elle
+    if (chosen.some(other => other !== slug && isDescendant(slug, other, FORUMS))) continue;
+    const f = FORUMS.find(x => x.slug === slug);
     if (!f || !f.topics) { unknown = true; continue; }
-    const left = Math.max(0, f.topics - (S.progress[slug] || 0));
+    const left = Math.max(0, f.topics - readCount(slug, FORUMS));
     pages += Math.ceil(f.topics / 40) + Math.round(left * 1.5);   // listes + ~1,5 page par sujet à lire
   }
   const capped = maxPages && pages > maxPages;
@@ -285,7 +372,8 @@ function render() {
   if (!S) return;
   $("summary").textContent = `${S.frequencies} fréquences enregistrées` + (S.user ? ` · ${S.user}` : "");
   $("view").textContent = `Voir les fréquences (${S.frequencies})`;
-  if (!built && S.forums.length) buildSections();
+  // reconstruit la liste si un scan a découvert de nouvelles sous-sections (les cases cochées sont mémorisées)
+  if (S.forums.length && (!built || forumList().map(f => f.slug).join(",") !== builtKey)) buildSections();
   if (built) updateProgress();
   renderAccount();
   const st = S.stats || {};

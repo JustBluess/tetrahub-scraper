@@ -109,24 +109,26 @@ class App:
             "finished": self.finished,
             "log": log,
             "frequencies": self.count_results(),
-            "progress": self.read_progress(),
+            "progress": self.read_state()[0],
+            "tree": self.read_state()[1],
         }
 
-    _progress = (None, {})
+    _state = (None, ({}, {}))
 
-    def read_progress(self):
-        """Nombre de sujets déjà lus par section, d'après etat.json."""
+    def read_state(self):
+        """D'après etat.json : (sujets déjà lus par section, sous-sections découvertes pendant les scans)."""
         mtime = os.path.getmtime(STATE) if os.path.exists(STATE) else None
-        if mtime != self._progress[0]:
-            topics = {}
+        if mtime != self._state[0]:
+            topics, tree = {}, {}
             if mtime:
                 state = json.load(open(STATE, encoding="utf-8"))
                 urls = {k.split("#")[0] for k in state.get("posts", [])} | set(state.get("topics", {}))
                 for u in urls:
                     slug = u.replace(ts.BASE, "").split("/")[0]
                     topics[slug] = topics.get(slug, 0) + 1
-            self._progress = (mtime, topics)
-        return self._progress[1]
+                tree = state.get("subforums", {})
+            self._state = (mtime, (topics, tree))
+        return self._state[1]
 
     _count = (None, 0)
 
@@ -204,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
                 app.hub.save_cookies(COOKIES)
                 app.user = app.hub.whoami()
                 app.log(f"Connecté en tant que {app.user}")
+                # certaines sous-sections (ex. les régions de Fréquences VHF/UHF) n'apparaissent qu'une fois connecté
+                app.forums = app.hub.list_forums()
             elif path == "/api/logout":
                 if app.running:
                     raise RuntimeError("Impossible pendant un scan")
@@ -212,6 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                 app.hub = ts.TetraHub()
                 app.user = None
                 app.log("Déconnecté (session.json supprimé)")
+                app.forums = app.hub.list_forums()
             elif path == "/api/scan":
                 app.start_scan(body.get("forums", []), body.get("delay", 5),
                                body.get("max_pages", 300), bool(body.get("full")))
@@ -220,6 +225,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 return self.send(404, "Not found", "text/plain")
         except Exception as e:
+            # visible aussi dans le journal de la page et dans le terminal (le mot de passe n'y figure jamais)
+            app.log(f"! {path} : {e}")
+            print(f"Erreur {path} : {e}")
             return self.send_json({"error": str(e)}, 400)
         self.send_json(app.status())
 
