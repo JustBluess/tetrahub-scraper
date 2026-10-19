@@ -9,6 +9,8 @@ Le serveur n'écoute que sur ta machine : personne d'autre ne peut y accéder.
 
 import json
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +26,43 @@ HOST, PORT = "127.0.0.1", 8765
 COOKIES = os.path.join(HERE, "session.json")
 OUT = os.path.join(HERE, "frequences")
 STATE = os.path.join(HERE, "etat.json")
+UPDATE_EVERY = 6 * 3600  # vérification des mises à jour GitHub toutes les 6 h
+
+
+def git(*args, timeout=30):
+    """Lance une commande git dans le dossier du projet, sans jamais demander de mot de passe."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    r = subprocess.run(["git", "-C", HERE, *args], capture_output=True, text=True, encoding="utf-8",
+                       timeout=timeout, env=env)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"git {args[0]} a échoué")
+    return r.stdout.strip()
+
+
+def repo_url():
+    """Adresse web du dépôt d'origine (https://github.com/...), ou None."""
+    try:
+        url = git("remote", "get-url", "origin")
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return None
+    url = re.sub(r"^git@github\.com:", "https://github.com/", url)   # forme SSH -> web
+    url = re.sub(r"\.git$", "", re.sub(r"https://[^@/]+@", "https://", url))  # sans .git ni identifiants
+    return url if url.startswith("https://github.com/") else None
+
+
+def check_updates():
+    """Nombre de changements publiés sur GitHub et pas encore récupérés (git pull), avec leurs titres.
+
+    Renvoie None si la vérification est impossible (pas de git, pas d'Internet, pas un dépôt...).
+    Ne modifie rien : `git fetch` télécharge seulement l'historique distant.
+    """
+    try:
+        git("fetch", "--quiet")
+        behind = int(git("rev-list", "--count", "HEAD..@{u}"))
+        titles = git("log", "--format=%s", "-n", "10", "HEAD..@{u}").splitlines() if behind else []
+        return {"behind": behind, "titles": titles, "checked": time.time(), "url": repo_url()}
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+        return None
 
 
 class App:
@@ -41,6 +80,13 @@ class App:
         self.stats = {}
         self.started = None
         self.finished = None
+        self.update = None
+
+    def watch_updates(self):
+        """Tourne en arrière-plan : vérifie GitHub au démarrage puis toutes les 6 h."""
+        while True:
+            self.update = check_updates()
+            time.sleep(UPDATE_EVERY)
 
     def refresh(self):
         """Vérifie la connexion et récupère la liste des sections (au démarrage)."""
@@ -109,6 +155,7 @@ class App:
             "finished": self.finished,
             "log": log,
             "frequencies": self.count_results(),
+            "update": self.update,
             "progress": self.read_state()[0],
             "tree": self.read_state()[1],
         }
@@ -233,6 +280,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    threading.Thread(target=app.watch_updates, daemon=True).start()
     print("Vérification de la connexion au forum...")
     app.refresh()
     print(f"Connecté en tant que {app.user}" if app.user else "Pas connecté : connecte-toi depuis la page.")
