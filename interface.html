@@ -56,10 +56,16 @@
   .cat-head .badge.on { color: var(--accent); }
   .cat-head button { padding: 1px 8px; font-size: 12px; font-weight: 400; }
   .cat:not([open]) > .cat-head { margin-bottom: 0; }
-  .sec { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 4px 2px;
-         border-radius: 5px; cursor: pointer; }
-  .sec:hover { background: var(--bg); }
-  .sec.sub { padding-left: 22px; }
+  /* une ligne = un bouton : clic pour la sélectionner (fond vert), re-clic pour la retirer.
+     La case à cocher reste dans la page (état, clavier) mais n'est plus affichée. */
+  .sec { position: relative; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+         padding: 6px 8px; margin: 2px 0; border-radius: 6px; cursor: pointer; user-select: none;
+         border: 1px solid transparent; transition: background .12s, border-color .12s; }
+  .sec input { position: absolute; opacity: 0; pointer-events: none; }
+  .sec:hover { background: var(--bg); border-color: var(--border); }
+  .sec:has(input:checked) { background: var(--ok-soft); border-color: var(--ok); }
+  .sec:has(input:checked) > span:first-of-type { color: var(--ok); font-weight: 600; }
+  .sec:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
   .sec .meta { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
   .sec .rec { color: var(--accent); font-size: 11.5px; margin-left: 6px; }
   .sec .twisty { display: inline-block; width: 18px; margin-right: 2px; text-align: center; color: var(--muted);
@@ -252,7 +258,7 @@ function buildSections() {
       const l = document.createElement("label"); l.className = "sec" + (f.sub ? " sub" : "");
       l.dataset.slug = f.slug;
       if (f.parent) l.dataset.parent = f.parent;
-      l.style.paddingLeft = (2 + 22 * depth(f)) + "px";
+      l.style.marginLeft = (28 * depth(f)) + "px";   // décalage des sous-sections sous leur section
       const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = f.slug; cb.checked = chosen.has(f.slug);
       cb.onchange = saveSelection;
       const name = document.createElement("span");
