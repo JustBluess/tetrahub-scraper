@@ -1,29 +1,16 @@
 """
 Récupère automatiquement les fréquences radio publiées sur forum.tetrahub.net.
 
-Le forum exige d'être connecté pour lire les sujets : le script se connecte avec
-TON compte (identifiants lus dans les variables d'environnement TETRAHUB_USER /
-TETRAHUB_PASS, ou demandés au clavier).
-
-Exemples :
-    python tetrahub_scraper.py                       # sections "Spectre radio"
-    python tetrahub_scraper.py --forums tetra dmr    # sections choisies
-    python tetrahub_scraper.py --list-forums         # liste des sections
-    python tetrahub_scraper.py --max-topics 5        # test rapide
-
-Résultats : frequences.csv (une ligne par fréquence trouvée) et frequences.json.
-Les messages déjà traités sont mémorisés dans etat.json : relancer le script
-ne récupère que les nouveautés.
+Ce fichier contient le moteur du scan ; il s'utilise depuis l'interface (`python web.py`).
+Résultats : frequences.html / .csv / .json. Les messages déjà traités sont mémorisés
+dans etat.json : relancer ne récupère que les nouveautés.
 """
 
-import argparse
 import csv
-import getpass
 import io
 import json
 import os
 import re
-import sys
 import time
 from urllib.parse import urljoin, urlparse, urlencode, parse_qsl, urlunparse
 
@@ -232,9 +219,6 @@ class TetraHub:
             err = BeautifulSoup(r.text, "html.parser").select_one(".error")
             raise RuntimeError("Connexion échouée" + (f" : {err.get_text(strip=True)}" if err else ""))
 
-    def is_logged_in(self):
-        return self.whoami() is not None
-
     def whoami(self):
         """Pseudo du compte connecté, ou None."""
         html = self.s.get(BASE, timeout=30).text
@@ -382,11 +366,8 @@ class TetraHub:
             url = clean_url(nxt["href"]) if nxt else None
 
 
-def extract(forum, topic_title, topic_url, post, section_name="", question=""):
-    """Transforme un message en lignes 'une fréquence par ligne' avec son contexte.
-
-    `question` : début du premier message du sujet, quand `post` est une réponse.
-    """
+def extract(forum, topic_title, topic_url, post, section_name=""):
+    """Transforme un message en lignes 'une fréquence par ligne' avec son contexte."""
     rows = []
     lines = [l.strip() for l in post["texte"].splitlines() if l.strip()]
     # Les lignes de tableaux sont souvent les plus riches (fréquence ; service ; ville...).
@@ -417,7 +398,6 @@ def extract(forum, topic_title, topic_url, post, section_name="", question=""):
                 "contexte": line[:300],
                 "titre_bloc": heading,
                 "citation": citation,
-                "question": question[:300],
                 "auteur": post["auteur"],
                 "date": post["date"],
                 "lien": f"{topic_url}#{post['id']}" if post["id"] else topic_url,
@@ -445,7 +425,10 @@ def load_results(path):
     pour que les anciennes données profitent aussi des corrections du détecteur."""
     if not os.path.exists(path):
         return []
-    return [r for r in json.load(open(path, encoding="utf-8")) if parse_frequencies(r["texte_trouve"])]
+    rows = [r for r in json.load(open(path, encoding="utf-8")) if parse_frequencies(r["texte_trouve"])]
+    for r in rows:
+        r.pop("question", None)   # champ abandonné (début du 1er message du sujet : surtout du bruit)
+    return rows
 
 
 def render_html(results, section_names=None):
@@ -465,14 +448,14 @@ def write_html(results, path):
     write_atomic(path, render_html(results))
 
 
-def read_topic(hub, forum, name, title, turl, old_mark, done, openings, results):
+def read_topic(hub, forum, name, title, turl, old_mark, done, results):
     """Lit les messages pas encore traités d'un sujet, ajoute leurs fréquences et renvoie leur nombre.
 
     Si le sujet a déjà été lu, on va directement à la page de son dernier message connu
     (les nouveaux messages sont forcément après) au lieu de tout relire depuis la page 1.
     """
     old = replies_in(old_mark)   # réponses lors de la dernière lecture : le dernier message lu porte ce n°
-    start = (old // POSTS_PER_PAGE) * POSTS_PER_PAGE if old is not None and turl in openings else 0
+    start = (old // POSTS_PER_PAGE) * POSTS_PER_PAGE if old is not None else 0
     while True:
         found, seen = 0, False
         for i, post in enumerate(hub.posts(turl, start)):
@@ -480,12 +463,9 @@ def read_topic(hub, forum, name, title, turl, old_mark, done, openings, results)
             key = f"{turl}#{post['id']}"
             if start and i == 0 and key not in done:
                 break  # la page ne commence pas par un message connu (décalage) : on relit tout
-            first = not start and i == 0
-            if first:
-                openings[turl] = re.sub(r"\s+", " ", post["texte"]).strip()[:300]
             if key in done:
                 continue
-            rows = extract(forum, title, turl, post, name, "" if first else openings.get(turl, ""))
+            rows = extract(forum, title, turl, post, name)
             results.extend(rows)
             found += len(rows)
             done.add(key)
@@ -496,8 +476,7 @@ def read_topic(hub, forum, name, title, turl, old_mark, done, openings, results)
         start = 0
 
 
-def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_topics=0,
-         log=print, stats=None):
+def scan(hub, forums, out="frequences", state_path="etat.json", log=print, stats=None):
     """Parcourt les sections et enregistre les résultats (même en cas d'arrêt ou d'erreur).
 
     `stats` est mis à jour au fil de l'eau, ce qui permet à l'interface web d'afficher la progression.
@@ -512,9 +491,8 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
         state.update(json.load(open(state_path, encoding="utf-8")))
     done = set(state["posts"])
     topic_marks = state["topics"]                  # empreintes enregistrées (toutes les sections)
-    known = {} if full else dict(topic_marks)      # empreintes utilisées pour sauter les sujets inchangés
+    known = dict(topic_marks)                      # empreintes utilisées pour sauter les sujets inchangés
     complete = set(state.get("complete", []))      # sections déjà lues en entier une fois
-    openings = state.get("openings", {})           # sujet -> début de son premier message (la question)
 
     json_path = f"{out}.json"
     results = load_results(json_path)
@@ -530,7 +508,7 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
         doublons, jamais des fréquences perdues."""
         save_json(json_path, results, indent=1)
         save_json(state_path, {"posts": sorted(done), "topics": topic_marks, "subforums": tree,
-                               "complete": sorted(complete), "openings": openings})
+                               "complete": sorted(complete)})
 
     def queue_subforums(forum):
         """Sous-sections repérées sur la première page : on les parcourt juste après
@@ -561,17 +539,14 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
             whole = True   # la section a-t-elle été lue sans rien sauter ?
             try:
                 # section déjà lue en entier : on arrête la liste au premier sujet inchangé
-                listing = hub.topics(forum, known if forum in complete and not full else None)
+                listing = hub.topics(forum, known if forum in complete else None)
                 for n, (title, turl, mark) in enumerate(listing, 1):
-                    if max_topics and n > max_topics:
-                        whole = False
-                        break
                     if mark and known.get(turl) == mark:
                         stats["skipped"] += 1  # aucun nouveau message depuis la dernière fois
                         continue
                     log(f"  [{n}] {title}")
                     try:
-                        found = read_topic(hub, forum, name, title, turl, known.get(turl), done, openings, results)
+                        found = read_topic(hub, forum, name, title, turl, known.get(turl), done, results)
                         # mémorisé seulement si le sujet a été lu en entier
                         topic_marks[turl] = mark
                         stats["topics"] += 1
@@ -614,7 +589,7 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
     finally:
         checkpoint()
         fields = ["section", "section_nom", "sujet", "frequence_mhz", "texte_trouve", "contexte",
-                  "titre_bloc", "citation", "question", "auteur", "date", "lien"]
+                  "titre_bloc", "citation", "auteur", "date", "lien"]
         buf = io.StringIO()
         w = csv.DictWriter(buf, fieldnames=fields, delimiter=";", lineterminator="\r\n")
         w.writeheader()
@@ -636,57 +611,3 @@ def scan(hub, forums, out="frequences", state_path="etat.json", full=False, max_
         name = os.path.basename(out)
         log(f"{stats['new']} nouvelles fréquences, {len(results)} au total -> {name}.html / .csv / .json")
     return stats
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Extraction des fréquences de forum.tetrahub.net")
-    ap.add_argument("--forums", nargs="+", default=DEFAULT_FORUMS, help="sections à parcourir (slug d'URL)")
-    ap.add_argument("--list-forums", action="store_true", help="affiche les sections et quitte")
-    ap.add_argument("--max-topics", type=int, default=0, help="limite de sujets par section (0 = tous)")
-    ap.add_argument("--delay", type=float, default=1.5, help="pause entre deux pages, en secondes")
-    ap.add_argument("--out", default="frequences", help="préfixe des fichiers de sortie")
-    ap.add_argument("--state", default="etat.json", help="fichier mémorisant les messages déjà traités")
-    ap.add_argument("--max-pages", type=int, default=0, help="arrête le scan après N pages (0 = pas de limite)")
-    ap.add_argument("--html-only", action="store_true", help="régénère seulement la page HTML, sans scanner")
-    ap.add_argument("--full",action="store_true", help="rouvre tous les sujets, même inchangés")
-    ap.add_argument("--cookies", default="session.json", help="fichier gardant la connexion (supprime-le pour te déconnecter)")
-    args = ap.parse_args()
-
-    hub = TetraHub(delay=args.delay)
-
-    if args.html_only:
-        results = load_results(f"{args.out}.json")
-        write_html(results, f"{args.out}.html")
-        print(f"Page générée -> {args.out}.html")
-        return
-
-    if args.list_forums:
-        for f in hub.list_forums():
-            print(f"{f['slug']:45} {'  ' if f['sub'] else ''}{f['name']}")
-        return
-
-    # On réutilise la connexion précédente si elle est encore valable : le mot de passe
-    # n'est jamais enregistré, seulement le cookie "se souvenir de moi" du forum.
-    hub.load_cookies(args.cookies)
-    if hub.is_logged_in():
-        hub.save_cookies(args.cookies)   # le forum a pu renouveler la clé "se souvenir de moi"
-        print("Connecté (session enregistrée).")
-    else:
-        user = os.environ.get("TETRAHUB_USER") or input("Nom d'utilisateur TetraHub : ")
-        pwd = os.environ.get("TETRAHUB_PASS") or getpass.getpass("Mot de passe : ")
-        hub.login(user, pwd)
-        hub.save_cookies(args.cookies)
-        print("Connecté.")
-
-    hub.max_pages = args.max_pages
-    try:
-        scan(hub, args.forums, out=args.out, state_path=args.state, full=args.full,
-             max_topics=args.max_topics)
-    except KeyboardInterrupt:
-        print("\nInterrompu : ce qui a été récupéré est enregistré.")
-    finally:
-        hub.save_cookies(args.cookies)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
